@@ -423,3 +423,125 @@ GET /nope   -> HTTP 404
   syntax- and byte-checked with all markers present, and the /status
   values they react to were driven live through the bridge above; the
   visual behaviour itself belongs to the on-machine install test.
+
+---
+
+# Fifth pass — smarter bots, dual controls, attention = warning (Nov 9, 2026)
+
+Navid's feedback after real play: (1) "the AI just bump each other and
+keep going in circles"; (2) arrow keys AND WASD should both work;
+(3) when Claude needs attention the game must NOT pause — keep playing,
+show a warning instead. All three addressed; local only, not yet pushed.
+
+## What was wrong with the old bot
+
+`botDrive` re-picked the NEAREST car every tick (no stickiness), aimed
+at its CURRENT position (pure pursuit — the classic orbiting pursuit
+curve against a moving target), applied full throttle whenever the
+target was within ~69° of the nose (wide powered arcs, never braked),
+and only thought about the edge within 90 units of the rim.
+
+## New bot decision structure (server/server.js)
+
+Per tick, in priority order: (1) edge survival with hysteresis (recover
+beyond 70% radius with outward heading/velocity, or beyond 85%
+regardless; resume inside 60%); (2) anti-stall reverse-and-turn burst;
+(3) power-up detour (token <300 away beats a chase target >210 away);
+(4) chase by INTERCEPTION — aim at target pos + vel × lead (≤0.85 s,
+aim clamped inside the arena) — with throttle discipline: brake/reverse
+when the target is >~106° off the nose, coast mid-turn (damping
+tightens the radius), full power only when aligned, coast on a very
+close fast final approach so a near miss doesn't blow past and loop.
+Targets are sticky 1.9–3.0 s and scored by effective distance (humans
+×1.0 vs bots ×1.35, wounded cars pulled in, score leader ×0.85).
+Progress = closing ≥12 units or scoring; 4 s without progress forces
+the manoeuvre + a re-target excluding the current one. Per-bot
+personality (aggro / turn deadband / stickiness) derives from botSeed.
+
+## Client changes (both copies, byte-identical)
+
+- Keys: arrows and WASD were both present in the keymap, but shared ONE
+  boolean per direction — hold ArrowUp + KeyW, release ArrowUp, and the
+  throttle cut out while KeyW was still held. Now physical keys are
+  tracked in a Set by e.code and kb is derived (kb.up = ArrowUp ||
+  KeyW, etc.); arrows preventDefault (no page scroll), Space
+  preventDefaults except on buttons/inputs, and a window-blur handler
+  clears the set so keys can't stick.
+- Attention: the input sender no longer zeroes keys — it sends
+  currentKeys() unconditionally. The old `#attentionOverlay` is now
+  `#attentionWarning`: pulsing red banner ("⚠️ Claude needs you —
+  check your terminal"), pointer-events:none so it can never block a
+  click, plus document.title switches to "⚠️ Claude needs you —
+  Bumper Cars" while attention lasts and restores afterwards. Polling
+  mechanics unchanged (localhost-only, 1 s, stops after 3 failures);
+  the 'done' banner is untouched.
+- Docs: plugin README events table + troubleshooting and the root
+  README events table reworded — the game warns, never pauses. Grep
+  confirms no residual "inputs are paused / blocking overlay / all keys
+  forced / car coasts" wording.
+
+## Test receipts
+
+Original suite: `node tests/multiplayer.test.js` → **23/23 passed**
+(before and after the bot rewrite).
+
+New suite `node tests/bot-ai.test.js` (3 unit + 4 integration), run 3×
+after the recovery fix below — **7/7 in all three runs**:
+
+```
+unit: edge override (>85% radius) brakes + turns to centre
+      input={up:false,down:true,left:false,right:true}
+unit: interception steers LEFT where pure pursuit steers RIGHT
+      (target crossing at +250 u/s; pursuit desired 1.28 rad,
+       intercept desired 0.41 rad, nose 0.9)
+unit: knockback sweep, 18 worst cases (r0 150/220/280 x vRad
+      200/260/320 x nose tangential/straight-out): worst peak radius
+      392 < 422 ring-out line; every case back inside r<280
+integration A: lone bot vs parked dummy — contact after 2.2 s,
+      dummy health 100 -> 77.6 (identical geometry all 3 runs)
+integration B: 15 s brawl, 3 bots + parked human — bot ring-outs 0/0/0,
+      bot wrecks 0; max bot score 39/32/38, min bot health 58/55/74
+      (they are fighting — scores and damage — just not self-eliminating)
+integration C: two bots placed head-on — contact after 0.9 s,
+      scores 20-23 vs 0, healths 88-89/88-89 (no orbiting)
+integration D: bot teleported to r=345 with a 150 u/s outward shove,
+      nose pointing out — peak radius 394, back inside r<280 after
+      1.8 s, no ring-out (all 3 runs)
+```
+
+Client greps: copies byte-identical (cmp); extracted script passes
+`node --check`; keymap contains both schemes and `kb.up` derives from
+`pressedCodes.has('ArrowUp')||pressedCodes.has('KeyW')`; the only
+remaining `agentStatus==='attention'` conditional in the file is the
+document.title setter; `attentionOverlay` occurs 0 times.
+
+## The honest part: a failure the 3× runs caught, and the fix
+
+Bot-suite run 3 of the FIRST version failed integration B with
+`botRingOuts=1`. Rather than re-rolling, a forensic harness (6 rooms ×
+20 s brawls, per-bot radius/velocity trails + lastHitBy/lastHitAt)
+reproduced 1 ring-out in 120 room-seconds and identified it: victim
+RoboRam, last hit 3,948 ms before exiting (NOT a fresh knockout blow).
+Trail: from r=146 it travelled outward at a sustained ~270 u/s (it was
+powered/chasing outward), crossed the recovery trigger at r≈285 still
+doing ~280 u/s outward, and then its outward speed decayed at roughly
+the pure-damping rate until it crossed 422 — i.e. while its nose
+crossed the recovery COAST band (1.15–2.35 rad off the centre
+direction) neither brake nor inward thrust engaged, and damping alone
+cannot arrest a 280 u/s slide from r=285. Fix: recovery has NO coast
+band — nose in the outward hemisphere => reverse thrust (which points
+inward) + damping actively kill the slide; nose with an inward
+component => drive in. After the fix: knockback sweep worst peak
+397 -> 392; forensic harness 2 × (6 rooms × 20 s) = 240 room-seconds
+with **0** bot ring-outs; suite 7/7 three times (above).
+
+## Not tested in this pass (honest)
+
+- The warning banner's visual appearance in a real browser (pulsing,
+  title swap) — code is syntax-checked and grep-verified; the visual
+  pass belongs to the on-machine plugin session, as before.
+- Keyboard behaviour in a real browser — the Set-based tracking is
+  plain DOM event code, syntax-checked; no browser here can hold keys.
+- Bot quality over full 90 s rounds against a skilled human — the
+  tests prove contact-making, anti-orbit and edge survival on bounded
+  windows, not long-game balance.

@@ -50,12 +50,29 @@ renders at devicePixelRatio for crisp graphics on retina displays.
 
 ## Install as a Claude Code plugin
 
-This repo doubles as a Claude Code plugin marketplace. In Claude Code:
+This repo doubles as a Claude Code plugin marketplace (marketplace name:
+`bumper-cars`). In a Claude Code session, type these **with the leading
+slash** — without it, Claude treats the line as a chat message and the
+plugin system never sees it:
 
 ```
 /plugin marketplace add Sun-Wukhan/bumper-cars-plugin
-/plugin install bumper-cars
+/plugin install bumper-cars@bumper-cars
 ```
+
+The first command should reply `Successfully added marketplace:
+bumper-cars`. The `@bumper-cars` suffix on the second is required: it is
+`<plugin>@<marketplace>`, per Anthropic's plugin docs.
+
+Shell alternative (run in a normal terminal, no session needed):
+
+```
+claude plugin marketplace add Sun-Wukhan/bumper-cars-plugin
+claude plugin install bumper-cars@bumper-cars
+```
+
+If `/plugin` does not appear in Claude Code's command autocomplete, your
+Claude Code predates plugins — run `claude update`, restart it, and retry.
 
 **Requirements:** Claude Code with plugin support, and Node.js on your
 PATH (the plugin's hooks and bridge are zero-dependency Node scripts).
@@ -65,7 +82,7 @@ What happens once it's installed:
 | Claude event                    | What happens                                                                 |
 | ------------------------------- | ---------------------------------------------------------------------------- |
 | You submit a prompt             | The game opens in your browser and auto-joins Quick Match on the public server. |
-| Claude needs your attention (notification / permission request) | The game shows a blocking **"✋ Claude needs you — check your terminal"** overlay and pauses your inputs until you've dealt with it. |
+| Claude needs your attention (notification / permission request) | The game shows a pulsing **"⚠️ Claude needs you — check your terminal"** warning banner and flags the tab title — but never pauses: you keep driving until you've dealt with it. |
 | The turn finishes               | A **"✅ Your code is ready"** banner appears; you can finish your round.      |
 | Any time                        | Type `/bumper` to open the game manually.                                    |
 

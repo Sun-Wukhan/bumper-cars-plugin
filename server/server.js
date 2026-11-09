@@ -66,6 +66,7 @@ function makeCar(name, isBot) {
     score: 0, health: MAX_HEALTH, eliminated: false, elimReason: null, boostT: 0,
     input: { up: false, down: false, left: false, right: false },
     lastHitBy: null, lastHitAt: 0, bumpCooldownUntil: 0, outUntil: 0, botSeed: Math.random() * 1000,
+    botAI: null, // lazily-created bot decision state (see botDrive); server-side only, never snapshotted
   };
 }
 function eliminate(car, reason) {
@@ -211,23 +212,156 @@ function stepCar(car, dt) {
   if (speed > MAXV) { car.vx = car.vx / speed * MAXV; car.vy = car.vy / speed * MAXV; }
   car.x += car.vx * dt; car.y += car.vy * dt;
 }
-function botDrive(car, room, dt, now) {
-  // Target nearest ACTIVE other car; if near/outside edge, head to centre first.
-  const distC = Math.hypot(car.x, car.y);
-  let tx, ty;
-  if (distC > ARENA_R - 90) { tx = 0; ty = 0; }
-  else {
-    let best = null, bd = 1e9;
-    for (const o of room.cars.values()) { if (o.id === car.id || o.eliminated) continue; const d = Math.hypot(o.x - car.x, o.y - car.y); if (d < bd) { bd = d; best = o; } }
-    if (!best) { car.input = { up: false, down: false, left: false, right: false }; return; }
-    tx = best.x; ty = best.y;
+// --- Bot AI ---
+// The old bot aimed at the target's CURRENT position at full throttle and
+// re-picked the nearest car every tick: a classic pursuit curve that
+// orbits a moving target forever (two bots chasing each other settled
+// into a stable circle dance) and blows through wide arcs because it
+// never braked to turn. The replacement decides, in priority order:
+//   1. EDGE SURVIVAL — beyond ~70% of the radius with outward heading or
+//      velocity (or beyond ~85% regardless): abandon the chase, drive
+//      for the centre, resume only once back inside ~60% (hysteresis).
+//   2. ANTI-STALL MANOEUVRE — a short reverse-and-turn burst (below).
+//   3. POWER-UP DETOUR — a close boost token beats a distant chase.
+//   4. CHASE — steer at the target's PREDICTED position (interception,
+//      not tail-chasing), with throttle discipline: brake/reverse when
+//      the target is far off the nose, coast mid-turn so damping
+//      tightens the turn radius, full power only when roughly aligned.
+// Target selection is sticky for ~2–3 s (stops flip-flopping) and scores
+// candidates by effective distance: humans preferred at comparable
+// range, wounded cars and the score leader pulled closer. Progress =
+// closing distance or scoring; ~4 s with neither triggers the anti-stall
+// manoeuvre plus a forced re-target, so a bot can never settle into an
+// orbit. Small per-bot personality (from botSeed) varies aggression,
+// steering responsiveness and stickiness so the field isn't in lockstep.
+const BOT_EDGE_RECOVER_R = ARENA_R * 0.70;
+const BOT_EDGE_SAFE_R = ARENA_R * 0.60;
+const BOT_EDGE_HARD_R = ARENA_R * 0.85;
+const BOT_TOKEN_DETOUR_DIST = 300;
+const BOT_TOKEN_TARGET_MIN = 210;
+const BOT_STALL_MS = 4000;
+const BOT_MANEUVER_MS = 650;
+
+function wrapAngle(a) { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; }
+
+function botPersonality(car) {
+  const s = car.botSeed || 0;
+  return {
+    aggro: 0.85 + ((s * 0.731) % 1) * 0.35,        // cornering throttle eagerness
+    turn: 0.9 + ((s * 0.317) % 1) * 0.3,           // steering deadband (responsiveness)
+    stickyMs: 1900 + ((s * 0.529) % 1) * 1100,     // target hold time 1.9–3.0 s
+  };
+}
+
+function pickBotTarget(car, room, excludeId) {
+  let topScore = 0;
+  for (const o of room.cars.values()) if (!o.eliminated && o.score > topScore) topScore = o.score;
+  let best = null, bestEff = Infinity, fallback = null, fallbackEff = Infinity;
+  for (const o of room.cars.values()) {
+    if (o.id === car.id || o.eliminated) continue;
+    const d = Math.hypot(o.x - car.x, o.y - car.y);
+    let eff = d;
+    if (o.isBot) eff *= 1.35;                             // humans first at comparable range
+    eff -= (MAX_HEALTH - o.health) * 0.9;                 // wounded cars are attractive
+    if (topScore > 0 && o.score >= topScore) eff *= 0.85; // hunt the score leader
+    if (eff < fallbackEff) { fallbackEff = eff; fallback = o; }
+    if (excludeId && o.id === excludeId) continue;        // anti-stall exclusion (fallback keeps it if it's the only option)
+    if (eff < bestEff) { bestEff = eff; best = o; }
   }
-  const desired = Math.atan2(ty - car.y, tx - car.x);
-  let diff = desired - car.angle;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  car.input = { up: Math.abs(diff) < 1.2, down: false, left: diff < -0.12, right: diff > 0.12 };
-  void dt; void now;
+  return best || fallback;
+}
+
+// Steer `car` toward aim point (ax, ay) and set car.input accordingly.
+function botSteer(car, ax, ay, opt) {
+  const diff = wrapAngle(Math.atan2(ay - car.y, ax - car.x) - car.angle);
+  const adiff = Math.abs(diff);
+  const dead = 0.09 / opt.persona.turn;
+  const input = { up: false, down: false, left: diff < -dead, right: diff > dead };
+  if (opt.mode === 'recover') {
+    // NO coast band while recovering. With the nose anywhere in the
+    // outward hemisphere, reverse thrust points inward and — with
+    // damping — actively kills the outward slide; once the nose has an
+    // inward component, drive in. (The original coast band between the
+    // two let a knocked bot slide out on damping alone: live forensics
+    // in TEST-RESULTS.md show a bot crossing r=285 at ~280 u/s outward
+    // and coasting through the rim while its nose crossed the band.)
+    if (adiff > 1.5) input.down = true;
+    else input.up = true;
+  } else {
+    if (adiff > 1.85) input.down = true;      // target far off the nose (>~106°): brake/reverse to tighten the turn instead of a wide powered arc
+    else if (adiff <= 1.0) {
+      input.up = true;
+      if (opt.persona.aggro < 1 && adiff > 0.55) input.up = false; // calmer personalities corner slower
+      // Final approach: very close and arriving much faster than the
+      // target — coast, so a near miss doesn't blow past and loop.
+      if (opt.dist != null && opt.dist < 60 && opt.relSpeed != null && opt.relSpeed > 150) input.up = false;
+    }
+    // 1.0 < adiff <= 1.85: coast through the turn — damping shrinks the turn radius
+  }
+  car.input = input;
+}
+
+function botDrive(car, room, dt, now) {
+  if (!car.botAI) car.botAI = { targetId: null, targetSince: 0, excludeId: null, recovering: false, bestDist: Infinity, lastProgressAt: now, lastScore: car.score, maneuverUntil: 0, maneuverDir: 1 };
+  const ai = car.botAI;
+  const persona = botPersonality(car);
+  const distC = Math.hypot(car.x, car.y);
+  const speed = Math.hypot(car.vx, car.vy);
+  const radialOut = distC > 1 ? (car.vx * car.x + car.vy * car.y) / distC : 0;   // outward radial speed
+  const headingOut = distC > 1 ? (Math.cos(car.angle) * car.x + Math.sin(car.angle) * car.y) / distC : 0; // cos(nose vs outward radial)
+
+  // 1) Edge survival — highest priority, with hysteresis.
+  if (!ai.recovering && (distC > BOT_EDGE_HARD_R || (distC > BOT_EDGE_RECOVER_R && (radialOut > 25 || headingOut > 0.25)))) ai.recovering = true;
+  if (ai.recovering && distC < BOT_EDGE_SAFE_R && radialOut < 60) ai.recovering = false;
+  if (ai.recovering) { botSteer(car, 0, 0, { persona, mode: 'recover' }); return; }
+
+  // 2) Anti-stall manoeuvre in progress: reverse-and-turn burst.
+  if (now < ai.maneuverUntil) {
+    car.input = { up: false, down: true, left: ai.maneuverDir < 0, right: ai.maneuverDir > 0 };
+    return;
+  }
+
+  // 3) Target bookkeeping: sticky pick + progress tracking.
+  let target = ai.targetId ? room.cars.get(ai.targetId) : null;
+  if (target && target.eliminated) target = null;
+  if (!target || now - ai.targetSince >= persona.stickyMs) {
+    const nt = pickBotTarget(car, room, ai.excludeId);
+    ai.excludeId = null;
+    if (nt && (!target || nt.id !== target.id)) { ai.targetId = nt.id; ai.targetSince = now; ai.bestDist = Infinity; ai.lastProgressAt = now; }
+    target = nt || target;
+  }
+  if (!target) { car.input = { up: false, down: false, left: false, right: false }; return; }
+  const distT = Math.hypot(target.x - car.x, target.y - car.y);
+  if (distT < ai.bestDist - 12 || car.score !== ai.lastScore) {
+    ai.bestDist = Math.min(ai.bestDist, distT); ai.lastProgressAt = now; ai.lastScore = car.score;
+  } else if (now - ai.lastProgressAt > BOT_STALL_MS) {
+    // No contact and no approach progress for ~4 s: break the pattern —
+    // reverse-and-turn burst, and afterwards pick a different target if
+    // one exists. This is what kills the mutual-orbit circle dance.
+    ai.maneuverUntil = now + BOT_MANEUVER_MS;
+    ai.maneuverDir = wrapAngle(Math.atan2(target.y - car.y, target.x - car.x) - car.angle) >= 0 ? -1 : 1;
+    ai.excludeId = target.id; ai.targetId = null; ai.lastProgressAt = now; ai.bestDist = Infinity;
+    car.input = { up: false, down: true, left: ai.maneuverDir < 0, right: ai.maneuverDir > 0 };
+    return;
+  }
+
+  // 4) Power-up detour: a close boost token beats a distant chase.
+  let token = null, tokenDist = Infinity;
+  for (const p of room.powerups || []) { const d = Math.hypot(p.x - car.x, p.y - car.y); if (d < tokenDist) { tokenDist = d; token = p; } }
+  if (token && tokenDist < BOT_TOKEN_DETOUR_DIST && distT > BOT_TOKEN_TARGET_MIN) {
+    botSteer(car, token.x, token.y, { persona, mode: 'token', dist: tokenDist });
+    return;
+  }
+
+  // 5) Chase by interception: aim where the target WILL be, and keep the
+  // aim point inside the arena so a target being shoved out doesn't drag
+  // the bot out after it.
+  const lead = Math.min(0.85, distT / Math.max(speed, 130));
+  let aimX = target.x + target.vx * lead, aimY = target.y + target.vy * lead;
+  const ad = Math.hypot(aimX, aimY), maxR = ARENA_R - 26;
+  if (ad > maxR) { aimX *= maxR / ad; aimY *= maxR / ad; }
+  botSteer(car, aimX, aimY, { persona, mode: 'chase', dist: distT, relSpeed: speed - Math.hypot(target.vx, target.vy) });
+  void dt;
 }
 function standingsOf(room) {
   // Score first; a surviving car wins ties over an eliminated one.
@@ -269,6 +403,7 @@ function endRound(room, cause) {
     car.x = p.x; car.y = p.y; car.vx = 0; car.vy = 0; car.angle = p.angle;
     car.lastHitBy = null;
     car.input = { up: false, down: false, left: false, right: false };
+    car.botAI = null; // fresh decisions for the new round
   }
   room.timeLeft = ROUND_SECONDS;
 }
@@ -401,4 +536,4 @@ function start(port = PORT) {
 if (require.main === module) {
   start().then(({ port }) => console.log(`bumper-cars listening on http://localhost:${port} (client + health at /health + WebSocket on same port, tick ${TICK_HZ}Hz, round ${ROUND_SECONDS}s)`));
 }
-module.exports = { start, rooms, resolveCollision, stepCar, makeCar, eliminate, spawnPowerup, collectPowerups, ARENA_R, CAR_R, ROUND_SECONDS, MAX_HEALTH, DAMAGE_K, HIT_THRESHOLD, BOOST_SECONDS, BOOST_MULT, POWERUP_PICKUP_DIST };
+module.exports = { start, rooms, resolveCollision, stepCar, makeCar, eliminate, spawnPowerup, collectPowerups, botDrive, pickBotTarget, ARENA_R, CAR_R, ROUND_SECONDS, MAX_HEALTH, DAMAGE_K, HIT_THRESHOLD, BOOST_SECONDS, BOOST_MULT, POWERUP_PICKUP_DIST };

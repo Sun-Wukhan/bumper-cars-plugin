@@ -34,10 +34,14 @@
  #outBanner button{margin:6px 4px 2px}
  #outSpectating{font-weight:400;font-size:14px;opacity:.9}
 
- /* --- Claude status overlays (bridge mode) --- */
- #attentionOverlay{position:fixed;top:0;left:0;right:0;z-index:60;background:#c0392b;color:#fff;
+ /* --- Claude status banners (bridge mode) --- */
+ /* Attention is a WARNING, never a pause: the banner sits at the top,
+    pulses so it can't be missed, and is pointer-events:none so it can
+    never block a click or a key — the player keeps driving normally. */
+ #attentionWarning{position:fixed;top:0;left:0;right:0;z-index:60;background:#c0392b;color:#fff;
    font-size:20px;font-weight:800;padding:16px 12px;border-bottom:4px solid #7b241c;
-   box-shadow:0 4px 18px rgba(0,0,0,.5)}
+   box-shadow:0 4px 18px rgba(0,0,0,.5);pointer-events:none;animation:attPulse 1s ease-in-out infinite}
+ @keyframes attPulse{0%,100%{background:#c0392b}50%{background:#e74c3c}}
  #doneBanner{position:fixed;top:0;left:0;right:0;z-index:55;background:#1e8449;color:#fff;
    font-size:16px;font-weight:700;padding:10px 12px;border-bottom:3px solid #145a32}
 
@@ -65,7 +69,7 @@
  <p id="err" style="color:#e74c3c"></p>
 </div>
 <div id="game" class="hidden">
- <div id="attentionOverlay" class="hidden">✋ Claude needs you — check your terminal</div>
+ <div id="attentionWarning" class="hidden">⚠️ Claude needs you — check your terminal</div>
  <div id="doneBanner" class="hidden">✅ Your code is ready — this turn finished</div>
  <div id="hud"><div>Room: <span id="roomCode"></span><br><small>Share this code to play together</small></div>
  <div>⏱️ <span id="timer">90</span>s</div><div id="scores"></div></div>
@@ -144,27 +148,30 @@ addEventListener('resize',fitCanvas);
 addEventListener('orientationchange',()=>setTimeout(fitCanvas,60));
 
 // --- input sender: exactly ONE interval for the page's lifetime ---
-// While the bridge reports 'attention' (Claude is asking the user
-// something) ALL inputs are forced to false — the car coasts to a stop
-// no matter what the player is holding.
+// The Claude status NEVER alters inputs: 'attention' shows a warning
+// banner (and flags the tab title) but the player keeps driving —
+// Navid explicitly reversed the old freeze-on-attention design.
 setInterval(()=>{ if(ws&&ws.readyState===1){
-  const keys = agentStatus==='attention' ? {up:false,down:false,left:false,right:false} : currentKeys();
-  ws.send(JSON.stringify({type:'input',keys}));
+  ws.send(JSON.stringify({type:'input',keys:currentKeys()}));
 } },50);
 
 // --- Claude bridge status polling (plugin mode only) ---
 // Active only when this page was served from localhost / 127.0.0.1, i.e.
 // by the plugin's local bridge. Polls GET /status (same origin) every
-// second and drives the two status overlays:
-//   attention -> blocking "Claude needs you" overlay + inputs paused
+// second and drives the two status banners:
+//   attention -> pulsing "⚠️ Claude needs you" WARNING banner + tab
+//                title flagged. Purely visual: the game does NOT pause
+//                and inputs are never touched — keep driving.
 //   done      -> "your code is ready" banner
-//   busy/idle -> both hidden
+//   busy/idle -> both hidden, title restored
 // After 3 consecutive failures it assumes this is not bridge mode after
-// all, stops polling and never shows the overlays.
+// all, stops polling and never shows the banners.
 (function(){
   const host=location.hostname;
   if (!(host==='localhost'||host==='127.0.0.1'||host==='[::1]'||host==='::1')) return;
-  let failures=0;
+  let failures=0, prevAgent=null;
+  const BASE_TITLE=document.title;
+  const setTitle=()=>{ document.title = agentStatus==='attention' ? '⚠️ Claude needs you — Bumper Cars' : BASE_TITLE; };
   const timer=setInterval(async ()=>{
     try{
       const r=await fetch('/status',{cache:'no-store'});
@@ -172,12 +179,13 @@ setInterval(()=>{ if(ws&&ws.readyState===1){
       const s=await r.json();
       failures=0;
       agentStatus=s.agent||'idle';
-      document.getElementById('attentionOverlay').classList.toggle('hidden', agentStatus!=='attention');
+      document.getElementById('attentionWarning').classList.toggle('hidden', agentStatus!=='attention');
       document.getElementById('doneBanner').classList.toggle('hidden', agentStatus!=='done');
+      if (agentStatus!==prevAgent){ prevAgent=agentStatus; setTitle(); }
     }catch(e){
       failures++;
-      if (failures>=3){ clearInterval(timer); agentStatus='idle';
-        document.getElementById('attentionOverlay').classList.add('hidden');
+      if (failures>=3){ clearInterval(timer); agentStatus='idle'; setTitle();
+        document.getElementById('attentionWarning').classList.add('hidden');
         document.getElementById('doneBanner').classList.add('hidden'); }
     }
   },1000);
@@ -259,11 +267,26 @@ function showResults(m){
   document.getElementById('resultsNewGame').onclick=playNewGame;
 }
 
-// --- keyboard ---
+// --- keyboard: arrow keys AND WASD, both live at once ---
+// Physical keys are tracked individually in a Set keyed by e.code, and
+// kb is DERIVED from it: kb.up = ArrowUp OR KeyW held, etc. (A single
+// shared boolean per direction was buggy: hold ArrowUp + KeyW, release
+// ArrowUp, and the throttle cut out even though KeyW was still held.)
 const keymap={ArrowUp:'up',KeyW:'up',ArrowDown:'down',KeyS:'down',ArrowLeft:'left',KeyA:'left',ArrowRight:'right',KeyD:'right'};
-addEventListener('keydown',e=>{ if(e.target&&e.target.tagName==='INPUT')return;
-  if(keymap[e.code]){kb[keymap[e.code]]=true;e.preventDefault();}});
-addEventListener('keyup',e=>{ if(keymap[e.code]){kb[keymap[e.code]]=false;e.preventDefault();}});
+const pressedCodes=new Set();
+function syncKb(){
+  kb.up=pressedCodes.has('ArrowUp')||pressedCodes.has('KeyW');
+  kb.down=pressedCodes.has('ArrowDown')||pressedCodes.has('KeyS');
+  kb.left=pressedCodes.has('ArrowLeft')||pressedCodes.has('KeyA');
+  kb.right=pressedCodes.has('ArrowRight')||pressedCodes.has('KeyD');
+}
+addEventListener('keydown',e=>{ const tag=e.target&&e.target.tagName;
+  if(tag==='INPUT')return; // typing a name / room code: leave keys (and space) alone
+  if(keymap[e.code]){ pressedCodes.add(e.code); syncKb(); e.preventDefault(); return; }
+  if(e.code==='Space'&&tag!=='BUTTON') e.preventDefault(); // stop page scroll; buttons keep their space-to-click
+});
+addEventListener('keyup',e=>{ if(keymap[e.code]){ pressedCodes.delete(e.code); syncKb(); e.preventDefault(); }});
+addEventListener('blur',()=>{ pressedCodes.clear(); syncKb(); }); // never leave a key stuck on when the tab loses focus
 
 // --- thumb buttons: per-button pointer tracking (multi-touch safe) ---
 document.querySelectorAll('.tbtn').forEach(b=>{

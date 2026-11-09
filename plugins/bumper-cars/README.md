@@ -28,7 +28,7 @@ The game page polls `/status` once a second and reacts:
 | `SessionStart`     | `idle`      | Nothing yet. The bridge starts lazily on your first prompt.             |
 | `UserPromptSubmit` | `busy`      | The game opens in your browser and auto-joins Quick Match.              |
 | `Notification`     | `attention` | —                                                                       |
-| `PermissionRequest`| `attention` | Blocking overlay: **"✋ Claude needs you — check your terminal"**, and your inputs are paused (all keys forced off — the car coasts) until Claude no longer needs you. |
+| `PermissionRequest`| `attention` | A pulsing red **warning banner**: **"⚠️ Claude needs you — check your terminal"**, and the tab title changes to flag it. The game **never pauses** — you keep driving normally; the warning is purely visual and clears when Claude no longer needs you. |
 | `Stop`             | `done`      | Banner: **"✅ Your code is ready — this turn finished"**. Inputs stay live — finish your round. The banner clears on the next turn. |
 | `SessionEnd`       | `idle`      | Overlays clear. The bridge is left running — it's stateless and tiny.   |
 
@@ -78,7 +78,7 @@ directory — `CLAUDE_PLUGIN_DATA` when Claude provides it, otherwise
   `?auto=1&name=…&server=…`; if you opened the bridge URL manually
   without those parameters you'll get the normal join screen — just use
   Quick Match, or add `?auto=1`.
-- **The "Claude needs you" overlay won't clear.** It follows `/status`
+- **The "Claude needs you" warning won't clear.** It follows `/status`
   live: it clears as soon as the next hook event moves the state out of
   `attention` (answering Claude's prompt leads to `busy`/`done`). You can
   check the raw state at `http://localhost:<port>/status`.
