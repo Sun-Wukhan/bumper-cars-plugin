@@ -1,0 +1,1 @@
+{"hooks":{"Stop":[{"hooks":[{"command":"echo bumper-cars:turn-stopped","type":"command"}]}],"UserPromptSubmit":[{"hooks":[{"command":"echo bumper-cars:turn-started","type":"command"}]}]}}

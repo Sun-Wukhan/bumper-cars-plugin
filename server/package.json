@@ -1,0 +1,1 @@
+{"dependencies":{"ws":"^8.22.2"},"description":"Authoritative WebSocket server for multiplayer bumper cars","main":"server.js","name":"bumper-cars-server","private":true,"scripts":{"start":"node server.js"},"version":"0.1.0"}

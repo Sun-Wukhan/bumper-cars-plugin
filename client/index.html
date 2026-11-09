@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Bumper Cars — while your code generates</title>
+<style>
+ body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;text-align:center}
+ #wrap{max-width:860px;margin:0 auto;padding:10px}
+ canvas{background:#1b2430;border-radius:50%;width:min(92vw,760px);height:min(92vw,760px);touch-action:none}
+ button,input{font-size:16px;padding:10px 14px;margin:4px;border-radius:8px;border:1px solid #555}
+ button{background:#2ecc71;color:#111;font-weight:700;cursor:pointer}
+ #hud{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}
+ #scores{text-align:left;min-width:180px}
+ .touch{display:none;grid-template-columns:repeat(3,64px);gap:6px;justify-content:center;margin-top:8px}
+ .touch button{height:56px}
+ @media (pointer:coarse){.touch{display:grid}}
+ .hidden{display:none}
+ #roomCode{font-size:28px;letter-spacing:4px;color:#f39c12;font-weight:800}
+</style></head><body><div id="wrap">
+<h1>🏎️ Bumper Cars</h1>
+<div id="join">
+ <p>Play while Claude / Codex generates. Real people can join your room.</p>
+ <input id="name" placeholder="Your name" maxlength="16" value="">
+ <div><button id="quick">Quick Match</button></div>
+ <div><input id="code" placeholder="ROOM CODE" maxlength="4" style="text-transform:uppercase;width:120px">
+ <button id="joinCode">Join by code</button></div>
+ <p id="err" style="color:#e74c3c"></p>
+</div>
+<div id="game" class="hidden">
+ <div id="hud"><div>Room: <span id="roomCode"></span><br><small>Share this code to play together</small></div>
+ <div>⏱️ <span id="timer">90</span>s</div><div id="scores"></div></div>
+ <canvas id="cv" width="800" height="800"></canvas>
+ <p>Arrows / WASD to drive. Bump others fast for points — push them out of the circle for +25.</p>
+ <div class="touch">
+   <span></span><button data-k="up">▲</button><span></span>
+   <button data-k="left">◀</button><button data-k="down">▼</button><button data-k="right">▶</button>
+ </div>
+</div></div>
+<script>
+const params = new URLSearchParams(location.search);
+// Server address: explicit ?server= override wins (dev/LAN use). Otherwise,
+// if this page was served over http(s) by the game server itself (local
+// single-port run or Render), connect back to the SAME origin over ws/wss.
+// Opened as a file:// page, fall back to the local dev server.
+function defaultServer(){
+  if (params.get('server')) return params.get('server');
+  if (location.protocol === 'http:' || location.protocol === 'https:') {
+    return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+  }
+  return 'ws://localhost:8787';
+}
+const SERVER = defaultServer();
+let ws, myId=null, state=null;
+const keys={up:false,down:false,left:false,right:false};
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+function connect(room){
+  ws=new WebSocket(SERVER);
+  ws.onopen=()=>ws.send(JSON.stringify({type:'join',name:document.getElementById('name').value||'Player',room:room||undefined}));
+  ws.onmessage=(ev)=>{const m=JSON.parse(ev.data);
+    if(m.type==='welcome'){myId=m.id;document.getElementById('roomCode').textContent=m.room;
+      document.getElementById('join').classList.add('hidden');document.getElementById('game').classList.remove('hidden');}
+    if(m.type==='state'){state=m;render();}
+    if(m.type==='results'){alert('Round over! Winner: '+(m.standings[0]?m.standings[0].name+' ('+m.standings[0].score+')':'—'));}
+    if(m.type==='error'){document.getElementById('err').textContent=m.message;}
+  };
+  ws.onclose=()=>{document.getElementById('err').textContent='Disconnected from server';};
+  setInterval(()=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'input',keys}))},50);
+}
+document.getElementById('quick').onclick=()=>connect('');
+document.getElementById('joinCode').onclick=()=>connect(document.getElementById('code').value.trim().toUpperCase());
+const keymap={ArrowUp:'up',KeyW:'up',ArrowDown:'down',KeyS:'down',ArrowLeft:'left',KeyA:'left',ArrowRight:'right',KeyD:'right'};
+addEventListener('keydown',e=>{if(keymap[e.code]){keys[keymap[e.code]]=true;e.preventDefault();}});
+addEventListener('keyup',e=>{if(keymap[e.code]){keys[keymap[e.code]]=false;e.preventDefault();}});
+document.querySelectorAll('.touch button').forEach(b=>{
+  const k=b.dataset.k;
+  b.addEventListener('pointerdown',e=>{keys[k]=true;e.preventDefault();});
+  b.addEventListener('pointerup',()=>keys[k]=false); b.addEventListener('pointerleave',()=>keys[k]=false);
+});
+function render(){
+  if(!state)return;
+  document.getElementById('timer').textContent=state.timeLeft;
+  const sorted=[...state.cars].sort((a,b)=>b.score-a.score);
+  document.getElementById('scores').innerHTML='<b>Scores</b><br>'+sorted.map(c=>
+    `<span style="color:${c.color}">●</span> ${c.name}${c.id===myId?' (you)':''}${c.isBot?' 🤖':''}: ${c.score}`).join('<br>');
+  const S=cv.width/2, R=state.arena.radius;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.beginPath();ctx.arc(S,S,R,0,7);ctx.fillStyle='#24344d';ctx.fill();ctx.lineWidth=6;ctx.strokeStyle='#f39c12';ctx.stroke();
+  for(const c of state.cars){
+    const x=S+c.x, y=S+c.y;
+    ctx.beginPath();ctx.arc(x,y,22,0,7);ctx.fillStyle=c.color;ctx.fill();ctx.lineWidth=c.id===myId?4:2;ctx.strokeStyle='#fff';ctx.stroke();
+    ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(c.angle)*22,y+Math.sin(c.angle)*22);ctx.lineWidth=5;ctx.strokeStyle='#111';ctx.stroke();
+    ctx.fillStyle='#fff';ctx.font='12px system-ui';ctx.textAlign='center';ctx.fillText(c.name,x,y-28);
+  }
+}
+</script></body></html>

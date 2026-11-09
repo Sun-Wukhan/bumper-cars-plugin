@@ -1,0 +1,18 @@
+# Render Blueprint — one free web service that serves the game client over
+# HTTP and the multiplayer WebSocket on the SAME port/origin.
+# Render injects PORT automatically; server/server.js reads process.env.PORT.
+# Players get: https://bumper-cars.onrender.com (or the URL Render assigns)
+# and the client auto-connects to wss://<that same host>.
+# Free plan caveat: the service sleeps when idle, so the first player after
+# a quiet period waits for a cold start.
+services:
+  - type: web
+    name: bumper-cars
+    env: node
+    plan: free
+    buildCommand: cd server && npm install
+    startCommand: cd server && node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
