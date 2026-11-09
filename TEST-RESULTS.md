@@ -231,3 +231,108 @@ GET /       -> 200, 15274 bytes, <title>Bumper Cars — while your code generate
   browser/deploy step.
 - The 90 s timer-expiry results path end-to-end (the early-end path through
   the same `endRound` code is now covered; see above).
+
+---
+
+# "Play a new game" choice + speed power-ups — 2026-11-09 (fourth pass)
+
+Changes: (1) **New-game choice for eliminated players** — the join protocol
+gains `exclude` (Quick Match only: the matchmaker never places the player
+in the excluded room; join-by-code unaffected). The client's out banner is
+now a choice — **▶ Play a new game** (quick-match elsewhere with
+`exclude` = the room just left, keeping the joined name; the old socket is
+closed by the existing `connect()`, so exactly one socket and the single
+input interval remain, and server-side bot takeover treats it as a normal
+disconnect) or **Keep spectating** (tracked per-round in `spectateChosen`;
+the banner collapses to a minimal spectating note and stays collapsed
+across state ticks until the player is alive again). The results panel
+gets the same **▶ Play a new game** button. The previously landed local
+client fixes (results-panel 6 s minimum display, stronger smoke, wreck /
+label clamping) are untouched.
+(2) **Random speed power-ups** — server spawns a golden `boost` token
+every 8–15 s of round time (max 2 active/room, random position within 80%
+of the arena radius; tokens carry a `type` field for future types). An
+active car (human or bot) within 34 units collects it: acceleration AND
+top speed ×1.6 for 8 s (`boostT` per car, counted down in `stepCar`,
+cleared on elimination and on round reset). Snapshots now carry
+`powerups: [{id,x,y,type}]` and per-car `boostLeft`. The client draws
+pulsing ⚡ orbs, exhaust streaks/flames on boosted cars, and a "⚡ Ns"
+countdown in the car's name label (next to its health bar).
+
+## Syntax checks
+```
+server/server.js          node --check OK
+tests/multiplayer.test.js node --check OK
+client inline JS          node --check OK (extracted from client/index.html)
+```
+
+## Automated suite — `node tests/multiplayer.test.js` (23/23, exit 0)
+All 15 previous checks pass **unchanged**, plus 8 new ones. The suite was
+run **three consecutive times: 23/23 each time**. Verbatim output of the
+first of those runs:
+```
+PASS  unit: collision resolves overlap & imparts impulse  impact=250.0 separation=44.0 scoreA=0 scoreB=21 vxA=-40.0 vxB=190.0
+PASS  unit: stepCar moves car under thrust  x -0.0 -> 125.2
+PASS  unit: high-impact collision damages both, slower car much more  impact=300.0 healthRammer=98.4 healthVictim=74.6 (victim dmg=25.4, rammer dmg=1.6)
+PASS  unit: car dropped to <=0 health is WRECKED (eliminated)  fragile health=-5.4 eliminated=true reason=wrecked wreckerHealth=98.4
+PASS  unit: boosted car accelerates harder and reaches a much higher speed than control  after 3s: control speed=301.9 x=666.2 | boosted speed=483.1 x=1065.9 boostLeft=5.0s
+PASS  unit: boost expires back to 0 and the normal 360 top-speed cap applies again  boostT after 0.2s=0 speed from 500 after one step=360.0 (cap 360)
+PASS  unit: eliminated car sitting on a token does not collect it  tokens left=1 deadBoostT=0
+server started on ephemeral port 38653
+PASS  both clients welcomed to same room  room=TEST idA=c12 idB=c16
+PASS  B receives state containing BOTH players cars  cars in state=Alice,RoboRam-TEST(bot),CrashBot-TEST(bot),TurboTed-TEST(bot),Bob total=5
+PASS  bots fill room to at least 4 cars  total cars=5
+PASS  state snapshots include health=100 and eliminated=false for fresh cars  healths=100,100,100,100,100
+PASS  A car position changed in state received by B after 1s input  A before=(0,180) after=(-146.8,180) moved=146.8px
+PASS  after A disconnects, its car remains in state as a bot (not a dead/vanished car)  car id=c12 present=true isBot=true name=Alice (bot) total cars=5
+PASS  bot-takeover car actually drives (moves over time)  bot moved=17.1px from (-275,180)
+PASS  ring-out eliminates the car (no respawn) and pays +25 to the last bumper  eliminated=true reason=ring_out scorer 0 -> 25 bobPos=(480,0)
+PASS  eliminated player input is ignored (car stays frozen, spectating)  pos before=(480,0) after=(480,0)
+PASS  round ends early with the sole survivor as winner (before the 90s timer)  cause=last_car_standing winner=Alice (bot)(c12) survivorEliminated=false standings=Alice (bot):25, RoboRam-TEST:0:OUT/wrecked, CrashBot-TEST:0:OUT/wrecked, TurboTed-TEST:0:OUT/wrecked, Bob:0:OUT/ring_out
+PASS  new round resets every car to health=100, eliminated=false  cars=Alice (bot)@100, RoboRam-TEST@100, CrashBot-TEST@100, TurboTed-TEST@100, Bob@100 timeLeft=90
+PASS  quick match with exclude skips the excluded room and receives state  seeded room=EXCL quickRoom=TEST cars=6
+PASS  eliminated player starts a new game in a DIFFERENT room as an active car (health=100)  wasEliminated=true/wrecked oldRoom=TEST newRoom=EXCL active=true health=100
+PASS  power-up token placed in the room appears in state snapshots  token id=p1 at=(0,-300) type=boost totalTokens=1
+PASS  driving onto a token consumes it and sets boostLeft > 0  boostLeft=8s tokenGone=true
+PASS  spawner creates a new token when the spawn timer fires (shortened-interval hook)  tokens=1 first=p2/boost at=(233.2,137.1)
+
+TOTAL: 23/23 passed
+```
+
+Key numbers:
+- Boost physics: identical input for 3 s → control 301.9 u/s / x=666.2 vs
+  boosted 483.1 u/s / x=1065.9 (1.60× the speed, as designed), with 5.0 s
+  of boost still remaining.
+- Expiry: `boostT` 0.12 → 0 after 0.2 s of stepping, and a 500 u/s car is
+  immediately back under the normal 360 cap (360.0 after one step).
+- Exclusion: seeded room `EXCL`; a quick-match join with `exclude=EXCL`
+  was welcomed to `TEST` (a different open room) with 6 cars in state.
+  Quick match *without* `exclude` is the pre-existing path, covered by
+  the original checks above and the earlier smoke tests.
+- New-game flow (end to end): Bob was wreck-eliminated in `TEST`,
+  observed his own elimination in state, then rejoined by quick match
+  with `exclude=TEST` and landed in `EXCL` as an active car at health 100.
+- Pickup: a token placed at (0,−300) appeared in snapshots
+  (`p1 … type=boost`); teleporting the player's car onto it consumed the
+  token and set `boostLeft=8`.
+- Spawner: with the room's token list cleared and `spawnIn` shortened to
+  0.05 s (the direct-manipulation hook, not a real 8–15 s wait), the next
+  states contained a fresh token (`p2/boost`) at a random in-arena spot.
+
+## HTTP smoke (same build, real process on PORT=9997)
+```
+GET /health -> {"ok":true}
+GET /       -> 200, 19,783 bytes; markers present: outNewGame ×2, outSpectate ×2,
+               resultsNewGame ×2, playNewGame ×3, exclude ×5, powerups, boostLeft ×2, ⚡ ×3
+```
+
+## Not tested in this pass
+- The new client UI (out-banner buttons, results-panel button, token /
+  boost rendering) in a real browser — syntax-checked and byte-checked
+  only; the protocol behaviour behind the buttons is what the Node-client
+  tests exercise (the button's exact join message is the one tested).
+- Organic bot pickups of randomly spawned tokens in live play (bots are
+  eligible via the same `collectPowerups` path the tests drive; no
+  bot-specific pickup was staged).
+- The natural 8–15 s spawn cadence over a full round (the spawner was
+  verified via the shortened-timer hook instead of real-time waits).

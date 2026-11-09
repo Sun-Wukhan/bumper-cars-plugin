@@ -31,6 +31,8 @@
  #resultsPanel h2{margin:2px 0 6px;text-align:center}
  #resultsPanel .row{display:flex;justify-content:space-between;gap:10px;padding:2px 0}
  #resultsPanel button{display:block;margin:8px auto 2px}
+ #outBanner button{margin:6px 4px 2px}
+ #outSpectating{font-weight:400;font-size:14px;opacity:.9}
 
  /* --- two-thumb touch controls --- */
  .touchbar{display:none}
@@ -58,7 +60,14 @@
 <div id="game" class="hidden">
  <div id="hud"><div>Room: <span id="roomCode"></span><br><small>Share this code to play together</small></div>
  <div>⏱️ <span id="timer">90</span>s</div><div id="scores"></div></div>
- <div id="outBanner" class="hidden">💥 You're out — spectating until the next round</div>
+ <div id="outBanner" class="hidden">
+  <div>💥 You're out</div>
+  <div id="outChoices">
+   <button id="outNewGame">▶ Play a new game</button>
+   <button id="outSpectate">Keep spectating</button>
+  </div>
+  <div id="outSpectating" class="hidden">👀 Spectating — you're back in next round, or jump out any time from the results panel</div>
+ </div>
  <div id="resultsPanel" class="hidden"></div>
  <canvas id="cv" width="800" height="800"></canvas>
  <p class="hint">Arrows / WASD, thumb buttons, or drag on the arena to drive. Bump others fast for points — wreck them or push them out of the circle (+25) to knock them out!</p>
@@ -91,7 +100,8 @@ const SERVER = defaultServer();
 if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window)) {
   document.body.classList.add('touch');
 }
-let ws, myId=null, state=null, resultsShown=false;
+let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
+let currentRoom=null, joinedName='Player', spectateChosen=false;
 // Three independent input sources, OR-ed together every send tick:
 // keyboard, on-screen thumb buttons, canvas drag joystick.
 const kb={up:false,down:false,left:false,right:false};
@@ -118,15 +128,20 @@ addEventListener('orientationchange',()=>setTimeout(fitCanvas,60));
 // --- input sender: exactly ONE interval for the page's lifetime ---
 setInterval(()=>{ if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'input',keys:currentKeys()})); },50);
 
-function connect(room){
+function connect(room, opts={}){
   if (ws) { try{ws.close();}catch(e){} }
+  // The player keeps the name they joined with across "Play a new game"
+  // hops; the join-screen input only seeds it on the first connect.
+  joinedName = opts.name || document.getElementById('name').value || joinedName || 'Player';
   ws=new WebSocket(SERVER);
-  ws.onopen=()=>ws.send(JSON.stringify({type:'join',name:document.getElementById('name').value||'Player',room:room||undefined}));
+  ws.onopen=()=>ws.send(JSON.stringify({type:'join',name:joinedName,room:room||undefined,
+    exclude:(!room && opts.exclude) ? opts.exclude : undefined}));
   ws.onmessage=(ev)=>{const m=JSON.parse(ev.data);
-    if(m.type==='welcome'){myId=m.id;document.getElementById('roomCode').textContent=m.room;
+    if(m.type==='welcome'){myId=m.id; currentRoom=m.room; spectateChosen=false;
+      document.getElementById('roomCode').textContent=m.room;
       document.getElementById('join').classList.add('hidden');document.getElementById('game').classList.remove('hidden');
       document.body.classList.add('ingame'); fitCanvas();}
-    if(m.type==='state'){state=m; if(resultsShown){resultsShown=false;document.getElementById('resultsPanel').classList.add('hidden');} render();}
+    if(m.type==='state'){state=m; if(resultsShown && performance.now()-resultsShownAt>6000){resultsShown=false;document.getElementById('resultsPanel').classList.add('hidden');} render();}
     if(m.type==='results'){showResults(m);}
     if(m.type==='error'){document.getElementById('err').textContent=m.message;}
   };
@@ -135,8 +150,39 @@ function connect(room){
 document.getElementById('quick').onclick=()=>connect('');
 document.getElementById('joinCode').onclick=()=>connect(document.getElementById('code').value.trim().toUpperCase());
 
+// --- "Play a new game": leave this match and quick-match into a DIFFERENT
+// room (the current room code goes as `exclude`, so the matchmaker can
+// never drop us straight back here). Closing the old socket is enough on
+// the server side: bot takeover keeps our old car playing as a bot.
+// Exactly one socket exists at a time (connect() closes the previous one)
+// and the single page-lifetime input interval just follows the new socket.
+function playNewGame(){
+  resultsShown=false; spectateChosen=false; state=null;
+  document.getElementById('resultsPanel').classList.add('hidden');
+  document.getElementById('outBanner').classList.add('hidden');
+  for (const src of [kb,btn,joy]) for (const k in src) src[k]=false;
+  connect('', { exclude: currentRoom||undefined, name: joinedName });
+}
+document.getElementById('outNewGame').onclick=playNewGame;
+document.getElementById('outSpectate').onclick=()=>{
+  spectateChosen=true; // per-round choice: render() keeps the banner minimal until the next round/elimination
+  const me=state&&state.cars.find(c=>c.id===myId); updateOutBanner(me);
+};
+
+// Out banner: full choice while undecided; once the player picks
+// "Keep spectating" it collapses to a minimal spectating note and STAYS
+// that way (render() calls this every state tick — the choice is tracked
+// in `spectateChosen`, reset when the player is alive again / rejoins).
+function updateOutBanner(me){
+  const banner=document.getElementById('outBanner');
+  if (!(me&&me.eliminated)){ banner.classList.add('hidden'); return; }
+  banner.classList.remove('hidden');
+  document.getElementById('outChoices').classList.toggle('hidden', spectateChosen);
+  document.getElementById('outSpectating').classList.toggle('hidden', !spectateChosen);
+}
+
 function showResults(m){
-  resultsShown=true;
+  resultsShown=true; resultsShownAt=performance.now();
   const p=document.getElementById('resultsPanel');
   const reason=c=>c.eliminated?(c.elimReason==='ring_out'?'OUT ⤴ ring-out':'OUT 💥 wrecked'):'';
   let html='<h2>🏁 Round over</h2>';
@@ -144,9 +190,10 @@ function showResults(m){
     ? `<div style="text-align:center;font-size:18px">🏆 <b>${m.winner.name}</b> wins with ${m.winner.score} pts</div>`
     : '<div style="text-align:center">No winner</div>';
   html+= m.standings.map((c,i)=>`<div class="row"><span>${i+1}. <span style="color:${'#eee'}">${c.name}</span>${c.isBot?' 🤖':''} ${reason(c)}</span><span>${c.score} pts</span></div>`).join('');
-  html+='<button id="resultsClose">Close</button>';
+  html+='<button id="resultsNewGame">▶ Play a new game</button><button id="resultsClose">Close</button>';
   p.innerHTML=html; p.classList.remove('hidden');
   document.getElementById('resultsClose').onclick=()=>{p.classList.add('hidden');resultsShown=false;};
+  document.getElementById('resultsNewGame').onclick=playNewGame;
 }
 
 // --- keyboard ---
@@ -194,14 +241,24 @@ function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,
 function healthColor(h){ return h>50?'#2ecc71':(h>25?'#f39c12':'#e74c3c'); }
 
 function drawCar(c,now){
-  const S=400, x=S+c.x, y=S+c.y;
+  const S=400;
+  // Eliminated (rung-out) cars sit outside the arena in world coordinates —
+  // clamp their wreck to the rim so it stays visible instead of off-canvas.
+  let dx=c.x, dy=c.y;
+  if (c.eliminated && state && state.arena){
+    const d=Math.hypot(dx,dy), max=state.arena.radius+14;
+    if (d>max){ dx=dx/d*max; dy=dy/d*max; }
+  }
+  const x=S+dx, y=S+dy;
   const hp=c.health==null?100:c.health;
-  // name + health bar (unrotated, above the car)
+  // name + health bar (unrotated, above the car; label clamped on-canvas)
+  const lx=Math.max(56,Math.min(744,x));
+  const boosted=(c.boostLeft||0)>0 && !c.eliminated;
   ctx.fillStyle='#fff'; ctx.font='12px system-ui'; ctx.textAlign='center';
-  ctx.fillText(c.name+(c.id===myId?' (you)':''),x,y-44);
+  ctx.fillText(c.name+(c.id===myId?' (you)':'')+(boosted?' ⚡'+Math.ceil(c.boostLeft)+'s':''),lx,y-44);
   if (!c.eliminated){
-    ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(x-22,y-38,44,6);
-    ctx.fillStyle=healthColor(hp); ctx.fillRect(x-22,y-38,44*Math.max(0,hp)/100,6);
+    ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(lx-22,y-38,44,6);
+    ctx.fillStyle=healthColor(hp); ctx.fillRect(lx-22,y-38,44*Math.max(0,hp)/100,6);
   }
   ctx.save(); ctx.translate(x,y); ctx.rotate(c.angle);
   if (c.eliminated){
@@ -228,13 +285,27 @@ function drawCar(c,now){
   // headlights
   ctx.fillStyle='#ffeaa7'; ctx.beginPath(); ctx.arc(29,-10,3.2,0,7); ctx.arc(29,10,3.2,0,7); ctx.fill();
   ctx.restore();
+  // boost feedback: exhaust streaks + flame jet behind the car
+  if (boosted){
+    const ca=Math.cos(c.angle), sa=Math.sin(c.angle);
+    const flick=1+0.3*Math.sin(now/45+(c.id.charCodeAt(1)||0)*3);
+    for (const off of [-11,0,11]){
+      const sx=x-ca*32-sa*off, sy=y-sa*32+ca*off, len=(off===0?22:15)*flick;
+      ctx.strokeStyle=off===0?'rgba(255,217,77,.9)':'rgba(126,214,255,.75)';
+      ctx.lineWidth=off===0?5:3;
+      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(sx-ca*len, sy-sa*len); ctx.stroke();
+    }
+    ctx.fillStyle='#e67e22'; ctx.beginPath();
+    ctx.moveTo(x-ca*30-sa*6, y-sa*30+ca*6); ctx.lineTo(x-ca*(30+18*flick), y-sa*(30+18*flick));
+    ctx.lineTo(x-ca*30+sa*6, y-sa*30-ca*6); ctx.closePath(); ctx.fill();
+  }
   // damage feedback: smoke, then flames when critical (cheap flicker via time)
   if (hp<50){
     const t=now/280 + (c.id.charCodeAt(1)||0);
-    ctx.fillStyle='rgba(180,180,180,.5)';
-    for(let i=0;i<(hp<25?4:2);i++){
-      const ph=(t+i*0.7)%1, sx=x-Math.cos(c.angle)*26+Math.sin(t*3+i)*4, sy=y-Math.sin(c.angle)*26-i*3;
-      ctx.beginPath(); ctx.arc(sx,sy,4+ph*7,0,7); ctx.globalAlpha=.45*(1-ph); ctx.fill(); ctx.globalAlpha=1;
+    ctx.fillStyle='#c9ced6';
+    for(let i=0;i<(hp<25?5:4);i++){
+      const ph=(t+i*0.55)%1, sx=x-Math.cos(c.angle)*26+Math.sin(t*3+i)*5, sy=y-Math.sin(c.angle)*26-ph*16;
+      ctx.beginPath(); ctx.arc(sx,sy,6+ph*11,0,7); ctx.globalAlpha=.85*(1-ph*.6); ctx.fill(); ctx.globalAlpha=1;
     }
     if (hp<25){
       const f=1+0.35*Math.sin(now/60+(c.id.charCodeAt(1)||0)*2);
@@ -259,10 +330,20 @@ function render(){
     return `<span style="color:${c.color}">●</span> ${c.name}${c.id===myId?' (you)':''}${c.isBot?' 🤖':''}: ${c.score}${status}`;
   }).join('<br>');
   const me=state.cars.find(c=>c.id===myId);
-  document.getElementById('outBanner').classList.toggle('hidden', !(me&&me.eliminated));
+  if (me && !me.eliminated) spectateChosen=false; // alive again (new round): the choice resets
+  updateOutBanner(me);
   const S=400, R=state.arena.radius, now=performance.now();
   ctx.clearRect(0,0,800,800);
   ctx.beginPath();ctx.arc(S,S,R,0,7);ctx.fillStyle='#24344d';ctx.fill();ctx.lineWidth=6;ctx.strokeStyle='#f39c12';ctx.stroke();
+  // power-up tokens: glowing golden orbs with a ⚡, gently pulsing
+  for (const p of (state.powerups||[])){
+    const px=S+p.x, py=S+p.y, pulse=1+0.15*Math.sin(now/280);
+    ctx.globalAlpha=.35; ctx.fillStyle='#f1c40f';
+    ctx.beginPath(); ctx.arc(px,py,21*pulse,0,7); ctx.fill(); ctx.globalAlpha=1;
+    ctx.fillStyle='#ffd94d'; ctx.beginPath(); ctx.arc(px,py,13*pulse,0,7); ctx.fill();
+    ctx.lineWidth=2; ctx.strokeStyle='#b9770e'; ctx.stroke();
+    ctx.font='15px system-ui'; ctx.textAlign='center'; ctx.fillText('⚡',px,py+5);
+  }
   for(const c of state.cars) drawCar(c,now);
   // joystick indicator
   if (joyPointer!==null&&joyOrigin&&joyNow){

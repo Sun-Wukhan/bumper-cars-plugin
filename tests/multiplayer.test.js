@@ -11,11 +11,11 @@ function check(name, ok, detail) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function makeClient(port, name, room) {
+function makeClient(port, name, room, extra) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port}`);
     const c = { ws, name, id: null, room: null, lastState: null, states: 0, lastResults: null, resultsCount: 0 };
-    ws.on('open', () => ws.send(JSON.stringify({ type: 'join', name, room })));
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'join', name, room, ...(extra || {}) })));
     ws.on('message', d => {
       const m = JSON.parse(d.toString());
       if (m.type === 'welcome') { c.id = m.id; c.room = m.room; resolve(c); }
@@ -67,6 +67,38 @@ async function waitResults(c, pred, timeout = 5000, label = '') {
   check('unit: car dropped to <=0 health is WRECKED (eliminated)',
     wb.eliminated === true && wb.elimReason === 'wrecked' && wb.health <= 0 && wa.eliminated === false,
     `fragile health=${wb.health.toFixed(1)} eliminated=${wb.eliminated} reason=${wb.elimReason} wreckerHealth=${wa.health.toFixed(1)}`);
+
+  // --- Unit (power-ups): boosted car is measurably faster than a control ---
+  // Identical input for 3 s of stepCar: boost multiplies accel AND top
+  // speed by 1.6, so the boosted car must end up much faster/farther.
+  const pc = serverMod.makeCar('Control', false); const pb = serverMod.makeCar('Boosted', false);
+  for (const c of [pc, pb]) { c.x = 0; c.y = 0; c.vx = 0; c.vy = 0; c.angle = 0; c.input = { up: true, down: false, left: false, right: false }; }
+  pb.boostT = serverMod.BOOST_SECONDS;
+  for (let i = 0; i < 60; i++) { serverMod.stepCar(pc, 0.05); serverMod.stepCar(pb, 0.05); }
+  const pcSpeed = Math.hypot(pc.vx, pc.vy), pbSpeed = Math.hypot(pb.vx, pb.vy);
+  check('unit: boosted car accelerates harder and reaches a much higher speed than control',
+    pbSpeed > pcSpeed * 1.4 && pbSpeed > 400 && pb.x > pc.x * 1.3,
+    `after 3s: control speed=${pcSpeed.toFixed(1)} x=${pc.x.toFixed(1)} | boosted speed=${pbSpeed.toFixed(1)} x=${pb.x.toFixed(1)} boostLeft=${pb.boostT.toFixed(1)}s`);
+
+  // --- Unit (power-ups): boost expires to 0 and speed caps return to normal ---
+  const ex = serverMod.makeCar('Expiring', false);
+  ex.boostT = 0.12; ex.input = { up: false, down: false, left: false, right: false };
+  for (let i = 0; i < 4; i++) serverMod.stepCar(ex, 0.05); // 0.20s > 0.12s of boost
+  const boostAfter = ex.boostT;
+  ex.vx = 500; ex.vy = 0; serverMod.stepCar(ex, 0.05);
+  const exSpeed = Math.hypot(ex.vx, ex.vy);
+  check('unit: boost expires back to 0 and the normal 360 top-speed cap applies again',
+    boostAfter === 0 && exSpeed <= 360.5,
+    `boostT after 0.2s=${boostAfter} speed from 500 after one step=${exSpeed.toFixed(1)} (cap 360)`);
+
+  // --- Unit (power-ups): eliminated cars do NOT pick up tokens ---
+  const dead = serverMod.makeCar('Dead', false);
+  dead.x = 50; dead.y = 50; serverMod.eliminate(dead, 'wrecked');
+  const fakeRoom = { cars: new Map([[dead.id, dead]]), powerups: [{ id: 'px', x: 50, y: 50, type: 'boost' }] };
+  serverMod.collectPowerups(fakeRoom);
+  check('unit: eliminated car sitting on a token does not collect it',
+    fakeRoom.powerups.length === 1 && (dead.boostT || 0) === 0,
+    `tokens left=${fakeRoom.powerups.length} deadBoostT=${dead.boostT || 0}`);
 
   // --- Integration ---
   const srv = await serverMod.start(0);
@@ -158,6 +190,63 @@ async function waitResults(c, pred, timeout = 5000, label = '') {
       stFresh.cars.every(c => c.health === 100 && !c.eliminated),
       `cars=${stFresh.cars.map(c => c.name + '@' + c.health).join(', ')} timeLeft=${stFresh.timeLeft}`);
 
+    // --- Integration (NEW f): quick match with `exclude` never lands in the excluded room ---
+    // (Quick match WITHOUT exclude is covered unchanged by the original
+    // suite above and the earlier smoke tests — same code path, no exclude.)
+    // Seed a room by code, then quick-match while excluding it.
+    const E = await makeClient(port, 'ExclSeed', 'EXCL');
+    const Q = await makeClient(port, 'Quinn', undefined, { exclude: 'EXCL' });
+    const stQ = await waitState(Q, s => s.cars.some(c => c.id === Q.id), 4000, 'quick-match-with-exclude state');
+    check('quick match with exclude skips the excluded room and receives state',
+      Q.room !== 'EXCL' && !!Q.room && stQ.cars.length >= 1,
+      `seeded room=EXCL quickRoom=${Q.room} cars=${stQ.cars.length}`);
+
+    // --- Integration (NEW g): eliminated player chooses "Play a new game" ---
+    // Eliminate Bob in TEST (same mechanism as the ring-out/wreck tests),
+    // confirm he observes himself eliminated, then simulate exactly what
+    // the client button does: close his socket and re-join by QUICK MATCH
+    // with exclude=<old room>. He must land in a DIFFERENT room as an
+    // active car at full health.
+    const testRoom = serverMod.rooms.get('TEST');
+    const bobCar = testRoom.cars.get(B.id);
+    serverMod.eliminate(bobCar, 'wrecked');
+    const stElim = await waitState(B, s => { const c = s.cars.find(x => x.id === B.id); return c && c.eliminated; }, 4000, 'Bob observes his own elimination');
+    const bobElim = stElim.cars.find(c => c.id === B.id);
+    B.ws.close(); // leaving the old room (his wreck stays behind; nothing to take over)
+    await sleep(300);
+    const B2 = await makeClient(port, 'Bob', undefined, { exclude: 'TEST' });
+    const stB2 = await waitState(B2, s => s.cars.some(c => c.id === B2.id), 4000, 'new-game state');
+    const b2car = stB2.cars.find(c => c.id === B2.id);
+    check('eliminated player starts a new game in a DIFFERENT room as an active car (health=100)',
+      bobElim.eliminated === true && B2.room !== 'TEST' && !!b2car && b2car.eliminated === false && b2car.health === 100,
+      `wasEliminated=${bobElim.eliminated}/${bobElim.elimReason} oldRoom=TEST newRoom=${B2.room} active=${b2car && !b2car.eliminated} health=${b2car && b2car.health}`);
+
+    // --- Integration (power-ups): token appears in state, pickup consumes it, spawner refills ---
+    const room2 = serverMod.rooms.get(B2.room);
+    const b2srv = room2.cars.get(B2.id);
+    const tok = serverMod.spawnPowerup(room2, 0, -300, 'boost');
+    const stTok = await waitState(B2, s => (s.powerups || []).some(p => p.id === tok.id), 4000, 'power-up token in state');
+    const tokSeen = stTok.powerups.find(p => p.id === tok.id);
+    check('power-up token placed in the room appears in state snapshots',
+      !!tokSeen && tokSeen.type === 'boost',
+      `token id=${tok.id} at=(${tokSeen && tokSeen.x},${tokSeen && tokSeen.y}) type=${tokSeen && tokSeen.type} totalTokens=${stTok.powerups.length}`);
+    // Teleport B2's car straight onto the token: next ticks must consume
+    // it and switch its boost on.
+    b2srv.x = 0; b2srv.y = -300; b2srv.vx = 0; b2srv.vy = 0;
+    const stPick = await waitState(B2, s => { const c = s.cars.find(x => x.id === B2.id); return c && c.boostLeft > 0 && !(s.powerups || []).some(p => p.id === tok.id); }, 4000, 'power-up pickup');
+    const pickCar = stPick.cars.find(c => c.id === B2.id);
+    check('driving onto a token consumes it and sets boostLeft > 0',
+      pickCar.boostLeft > 0 && pickCar.boostLeft <= serverMod.BOOST_SECONDS,
+      `boostLeft=${pickCar.boostLeft}s tokenGone=${!(stPick.powerups || []).some(p => p.id === tok.id)}`);
+    // Spawner: clear tokens and shorten the spawn timer directly (the
+    // documented hook) instead of waiting a real 8–15 s.
+    room2.powerups = []; room2.spawnIn = 0.05;
+    const stSpawn = await waitState(B2, s => (s.powerups || []).length >= 1, 3000, 'spawner produces a token');
+    check('spawner creates a new token when the spawn timer fires (shortened-interval hook)',
+      stSpawn.powerups.length >= 1 && stSpawn.powerups.length <= 2,
+      `tokens=${stSpawn.powerups.length} first=${stSpawn.powerups[0].id}/${stSpawn.powerups[0].type} at=(${stSpawn.powerups[0].x},${stSpawn.powerups[0].y})`);
+
+    E.ws.close(); Q.ws.close(); B2.ws.close();
     B.ws.close();
   } finally {
     clearInterval(srv.timer); srv.wss.close(); srv.httpServer.close();

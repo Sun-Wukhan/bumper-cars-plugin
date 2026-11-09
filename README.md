@@ -80,8 +80,26 @@ Claude terminal pane) and keeps cheating / desync out of scope for v1.
   - *Wrecked:* a car whose health reaches **0** is **out**.
   Eliminated cars leave the physics simulation and are shown as grey wrecks;
   their score is kept. An eliminated human **spectates** — their input is
-  ignored — until the next round. (Bot takeover on disconnect only applies
-  to cars that are still in the round.)
+  ignored — until the next round, but spectating is a **choice**: the
+  "You're out" banner offers **▶ Play a new game** (leave immediately and
+  quick-match into a *different* room — see `exclude` in the protocol
+  below) or **Keep spectating** (the banner collapses to a minimal
+  spectating note until the next round). The results panel has the same
+  **▶ Play a new game** button. Leaving works like disconnecting: if the
+  car were still active a bot would take it over — an eliminated wreck
+  simply stays behind. (Bot takeover on disconnect only applies to cars
+  that are still in the round.)
+- **Power-ups (speed boost):** a golden ⚡ token spawns at a random spot
+  inside the arena (within 80% of the radius) every **8–15 seconds** of
+  round time, with at most **2 tokens active** per room. Any **active**
+  car — human or bot — that drives over a token (centre distance < 34)
+  collects it: its acceleration **and** top speed are multiplied by
+  **×1.6 for 8 seconds** (`boostLeft` in the state snapshot counts down).
+  Eliminated cars cannot collect tokens; elimination and round reset both
+  clear the boost. Only the `boost` type exists for now, but tokens carry
+  a `type` field so more types need no protocol change. Note the synergy:
+  a boosted ram reaches higher impact speeds, so it deals more damage
+  under the damage formula above — no special case required.
 - **Rounds & winning:** rounds last 90 seconds, but end **early** as soon as
   at most one active car remains: the sole survivor wins outright, regardless
   of score. (If a pile-up eliminates everyone simultaneously, the highest
@@ -93,6 +111,10 @@ Claude terminal pane) and keeps cheating / desync out of scope for v1.
   eliminations and positions and auto-restarts.
 - Rooms: max 6 cars. Quick Match reuses a room with space, otherwise creates one
   with a random 4-letter code. Join-by-code creates the room if it doesn't exist.
+  A Quick Match join may carry `exclude` (a room code): the matchmaker will
+  never place that player into the excluded room — it picks another open room
+  or creates a fresh one. Explicit join-by-code is unaffected (`exclude` is
+  ignored when a room is named).
 - Bots: rooms are filled with bots to at least 4 cars from the start. When a real
   player disconnects mid-round, **a bot immediately takes over their exact car**
   (same id, name gets a `(bot)` suffix) — matches never contain a dead car.
@@ -104,6 +126,7 @@ Client → server:
 
 ```json
 { "type": "join",  "name": "Alice", "room": "TEST" }   // room optional: omit/empty = Quick Match
+{ "type": "join",  "name": "Alice", "exclude": "TEST" } // Quick Match, but never into room TEST
 { "type": "input", "keys": { "up": true, "down": false, "left": false, "right": true } }
 ```
 
@@ -114,7 +137,8 @@ Server → client:
 { "type": "state",   "room": "TEST", "timeLeft": 87, "arena": { "radius": 400 },
   "cars": [ { "id": "c4", "name": "Alice", "color": "#e74c3c", "isBot": false,
               "x": 180, "y": 12.5, "vx": 40, "vy": 120, "angle": 1.57, "score": 12,
-              "health": 87, "eliminated": false, "elimReason": null } ] }
+              "health": 87, "eliminated": false, "elimReason": null, "boostLeft": 5.5 } ],
+  "powerups": [ { "id": "p1", "x": -120, "y": 240, "type": "boost" } ] }
 { "type": "results", "room": "TEST", "cause": "last_car_standing",
   "winner": { "id": "c4", "name": "Alice", "score": 62 },
   "standings": [ { "id": "c4", "name": "Alice", "score": 62, "isBot": false, "health": 41, "eliminated": false, "elimReason": null },
@@ -132,7 +156,9 @@ See `TEST-RESULTS.md` for the verified runs (two real WebSocket clients,
 movement seen cross-client, collision/scoring unit tests, bot takeover, plus
 the elimination suite: damage split, wreck elimination, ring-out elimination
 with the +25 credit and ignored spectator input, early round end with a sole
-survivor, and new-round reset).
+survivor, and new-round reset — plus the "Play a new game" exclusion checks
+and the power-up suite: token in state, pickup → boost, boosted-vs-control
+speed, boost expiry, no pickup when eliminated, and the token spawner).
 
 ## Deploy to Render (public internet play)
 

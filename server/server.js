@@ -29,10 +29,20 @@ const MAX_HEALTH = 100;
 // ~11 to each car.
 const DAMAGE_K = 0.09;
 const HIT_THRESHOLD = 80; // u/s impact: below this, no points and no damage
+// Power-ups: tokens spawn inside the arena every 8–15 s (max 2 active per
+// room). Type 'boost' is the only type for now; the token carries a `type`
+// field so a second type can be added without a protocol change.
+const POWERUP_TYPES = ['boost'];
+const POWERUP_MAX_ACTIVE = 2;
+const POWERUP_SPAWN_MIN_S = 8, POWERUP_SPAWN_MAX_S = 15;
+const POWERUP_PICKUP_DIST = 34; // car centre to token centre (car r=22 + token r≈12)
+const BOOST_SECONDS = 8;
+const BOOST_MULT = 1.6; // multiplies BOTH acceleration and top speed while active
 const COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c'];
 const BOT_NAMES = ['RoboRam', 'CrashBot', 'TurboTed', 'Bump-o-matic', 'Sir Honks'];
 
 let nextId = 1;
+let nextPowerId = 1;
 const rooms = new Map(); // code -> room
 
 function randomCode() {
@@ -53,7 +63,7 @@ function makeCar(name, isBot) {
     id, name: String(name || 'Player').slice(0, 16) || 'Player', isBot: !!isBot,
     color: COLORS[(nextId - 2) % COLORS.length],
     x: p.x, y: p.y, vx: 0, vy: 0, angle: p.angle,
-    score: 0, health: MAX_HEALTH, eliminated: false, elimReason: null,
+    score: 0, health: MAX_HEALTH, eliminated: false, elimReason: null, boostT: 0,
     input: { up: false, down: false, left: false, right: false },
     lastHitBy: null, lastHitAt: 0, bumpCooldownUntil: 0, outUntil: 0, botSeed: Math.random() * 1000,
   };
@@ -64,12 +74,43 @@ function eliminate(car, reason) {
   car.elimReason = reason; // 'ring_out' | 'wrecked'
   if (reason === 'wrecked') car.health = Math.min(car.health, 0);
   car.vx = 0; car.vy = 0;
+  car.boostT = 0; // elimination clears any active boost
   car.input = { up: false, down: false, left: false, right: false };
 }
 function makeRoom(code) {
-  const room = { code, cars: new Map(), timeLeft: ROUND_SECONDS, createdAt: Date.now() };
+  const room = {
+    code, cars: new Map(), timeLeft: ROUND_SECONDS, createdAt: Date.now(),
+    powerups: [], spawnIn: POWERUP_SPAWN_MIN_S + Math.random() * (POWERUP_SPAWN_MAX_S - POWERUP_SPAWN_MIN_S),
+  };
   rooms.set(code, room);
   return room;
+}
+// Spawn a power-up token at a random position within ~80% of the arena
+// radius (or at an explicit position — used by tests for determinism).
+function spawnPowerup(room, x, y, type) {
+  if (x == null || y == null) {
+    const ang = Math.random() * Math.PI * 2;
+    const rad = Math.sqrt(Math.random()) * ARENA_R * 0.8;
+    x = Math.cos(ang) * rad; y = Math.sin(ang) * rad;
+  }
+  const p = { id: 'p' + (nextPowerId++), x, y, type: type || POWERUP_TYPES[0] };
+  room.powerups.push(p);
+  return p;
+}
+// Pickup: any ACTIVE car (human or bot) whose centre comes within
+// POWERUP_PICKUP_DIST of a token collects it. Eliminated cars never do.
+function collectPowerups(room) {
+  if (!room.powerups || room.powerups.length === 0) return;
+  room.powerups = room.powerups.filter(p => {
+    for (const car of room.cars.values()) {
+      if (car.eliminated) continue;
+      if (Math.hypot(car.x - p.x, car.y - p.y) < POWERUP_PICKUP_DIST) {
+        if (p.type === 'boost') car.boostT = BOOST_SECONDS; // (re)starts the 8 s timer
+        return false; // token consumed
+      }
+    }
+    return true;
+  });
 }
 function humanCount(room) { return [...room.cars.values()].filter(c => !c.isBot).length; }
 function ensureBots(room) {
@@ -82,8 +123,9 @@ function ensureBots(room) {
     room.cars.set(bot.id, bot);
   }
 }
-function findQuickRoom() {
+function findQuickRoom(excludeCode) {
   for (const room of rooms.values()) {
+    if (excludeCode && room.code === excludeCode) continue; // quick match must not land back in the excluded room
     if (humanCount(room) >= 1 && room.cars.size < MAX_CARS) return room;
     if (humanCount(room) >= 1 && humanCount(room) < MAX_CARS) return room; // full of bots: a bot can be swapped out
   }
@@ -152,14 +194,20 @@ function stepCar(car, dt) {
   const inp = car.input || {};
   if (inp.left) car.angle -= 3.2 * dt;
   if (inp.right) car.angle += 3.2 * dt;
-  const accel = 340;
+  // Boost: the timer ticks down in real time, and while it is running BOTH
+  // acceleration and top speed are multiplied. Higher impact speed from a
+  // boosted ram therefore deals more damage via resolveCollision as-is.
+  const boosted = (car.boostT || 0) > 0;
+  if (boosted) car.boostT = Math.max(0, car.boostT - dt);
+  const mult = boosted ? BOOST_MULT : 1;
+  const accel = 340 * mult;
   if (inp.up) { car.vx += Math.cos(car.angle) * accel * dt; car.vy += Math.sin(car.angle) * accel * dt; }
   if (inp.down) { car.vx -= Math.cos(car.angle) * accel * 0.55 * dt; car.vy -= Math.sin(car.angle) * accel * 0.55 * dt; }
   // damping
   const damp = Math.pow(0.35, dt); // strong-ish arcade damping per second
   car.vx *= damp; car.vy *= damp;
   const speed = Math.hypot(car.vx, car.vy);
-  const MAXV = 360;
+  const MAXV = 360 * mult;
   if (speed > MAXV) { car.vx = car.vx / speed * MAXV; car.vy = car.vy / speed * MAXV; }
   car.x += car.vx * dt; car.y += car.vy * dt;
 }
@@ -211,9 +259,12 @@ function endRound(room, cause) {
     winner: winner ? { id: winner.id, name: winner.name, score: winner.score } : null,
     standings,
   });
-  // Reset for the next round: scores, health, elimination, positions.
+  // Reset for the next round: scores, health, elimination, positions,
+  // boosts and power-up tokens.
+  room.powerups = [];
+  room.spawnIn = POWERUP_SPAWN_MIN_S + Math.random() * (POWERUP_SPAWN_MAX_S - POWERUP_SPAWN_MIN_S);
   for (const car of room.cars.values()) {
-    car.score = 0; car.health = MAX_HEALTH; car.eliminated = false; car.elimReason = null;
+    car.score = 0; car.health = MAX_HEALTH; car.eliminated = false; car.elimReason = null; car.boostT = 0;
     const p = spawnPos(Math.floor(Math.random() * 8));
     car.x = p.x; car.y = p.y; car.vx = 0; car.vy = 0; car.angle = p.angle;
     car.lastHitBy = null;
@@ -227,6 +278,14 @@ function stepRoom(room, dt) {
   for (const car of room.cars.values()) stepCar(car, dt);
   const cars = [...room.cars.values()];
   for (let i = 0; i < cars.length; i++) for (let j = i + 1; j < cars.length; j++) resolveCollision(cars[i], cars[j], now);
+  collectPowerups(room);
+  // Power-up spawner: every 8–15 s of round time, max POWERUP_MAX_ACTIVE
+  // tokens live at once. Tests can force a spawn by setting room.spawnIn ≈ 0.
+  room.spawnIn -= dt;
+  if (room.spawnIn <= 0) {
+    if (room.powerups.length < POWERUP_MAX_ACTIVE) spawnPowerup(room);
+    room.spawnIn = POWERUP_SPAWN_MIN_S + Math.random() * (POWERUP_SPAWN_MAX_S - POWERUP_SPAWN_MIN_S);
+  }
   // Ring-out = ELIMINATION for the rest of the round (no respawn). The
   // player who last bumped the victim (within 3 s) still gets +25.
   for (const car of cars) {
@@ -258,7 +317,9 @@ function snapshot(room) {
       vx: Math.round(c.vx), vy: Math.round(c.vy),
       angle: Math.round(c.angle * 100) / 100, score: c.score,
       health: Math.max(0, Math.round(c.health)), eliminated: c.eliminated, elimReason: c.elimReason,
+      boostLeft: Math.max(0, Math.round((c.boostT || 0) * 10) / 10),
     })),
+    powerups: (room.powerups || []).map(p => ({ id: p.id, x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10, type: p.type })),
   };
 }
 const clients = new Map(); // ws -> {room, carId}
@@ -301,8 +362,14 @@ function start(port = PORT) {
       if (msg.type === 'join') {
         let room;
         const code = (msg.room || '').toString().trim().toUpperCase();
+        // Join-by-code is a deliberate choice and is always honoured.
+        // `exclude` only applies to Quick Match (no room requested): the
+        // matchmaker will not place the player into that room (used by the
+        // "Play a new game" button so an eliminated player does not land
+        // straight back in the match they just left).
+        const exclude = (msg.exclude || '').toString().trim().toUpperCase();
         if (code) { room = rooms.get(code) || makeRoom(code); }
-        else { room = findQuickRoom() || makeRoom(randomCode()); }
+        else { room = findQuickRoom(exclude) || makeRoom(randomCode()); }
         const car = addHumanToRoom(room, msg.name);
         if (!car) { ws.send(JSON.stringify({ type: 'error', message: 'room full' })); return; }
         clients.set(ws, { room, carId: car.id });
@@ -334,4 +401,4 @@ function start(port = PORT) {
 if (require.main === module) {
   start().then(({ port }) => console.log(`bumper-cars listening on http://localhost:${port} (client + health at /health + WebSocket on same port, tick ${TICK_HZ}Hz, round ${ROUND_SECONDS}s)`));
 }
-module.exports = { start, rooms, resolveCollision, stepCar, makeCar, eliminate, ARENA_R, CAR_R, ROUND_SECONDS, MAX_HEALTH, DAMAGE_K, HIT_THRESHOLD };
+module.exports = { start, rooms, resolveCollision, stepCar, makeCar, eliminate, spawnPowerup, collectPowerups, ARENA_R, CAR_R, ROUND_SECONDS, MAX_HEALTH, DAMAGE_K, HIT_THRESHOLD, BOOST_SECONDS, BOOST_MULT, POWERUP_PICKUP_DIST };
