@@ -20,13 +20,23 @@ static server needed: `GET /` returns the game client and the client
 connects its WebSocket back to the same origin (`ws://localhost:8787`).
 `GET /health` returns `{"ok":true}`.
 
-Client server address logic (in `client/index.html`):
+Client server address logic (in `client/index.html`), in order:
 
 - `?server=ws://HOST:PORT` in the URL always wins (dev / LAN override, e.g.
-  `?server=ws://192.168.1.5:8787` for a friend on your LAN).
-- Served over `http:`/`https:` → connects to the same host over `ws:`/`wss:`.
+  `?server=ws://192.168.1.5:8787` for a friend on your LAN; this is also
+  how the Claude Code plugin's opener points the page at the real server).
+- Served over `https:` → connects to the same host over `wss:`.
+- Served from `localhost` / `127.0.0.1` (e.g. by the Claude plugin's local
+  bridge) → the public multiplayer server
+  `wss://bumper-cars-gfye.onrender.com`, because a local page is not a
+  game server.
+- Served over plain `http:` from another host → same host over `ws:`.
 - Opened as a `file://` page → falls back to `ws://localhost:8787`
   (you can still open `client/index.html` directly that way).
+
+The page also supports `?auto=1&name=<name>&room=<CODE>` — preset the
+player name and join immediately (Quick Match, or the given room) with no
+click. The Claude Code plugin's opener uses this.
 
 Play: enter a name → **Quick Match**, or enter a 4-letter room code → **Join by code**.
 The room code is shown in-game — share it so friends land in your exact room.
@@ -38,6 +48,53 @@ the car drives toward the drag direction. All three input sources combine.
 The in-game layout fits a phone screen without scrolling, and the canvas
 renders at devicePixelRatio for crisp graphics on retina displays.
 
+## Install as a Claude Code plugin
+
+This repo doubles as a Claude Code plugin marketplace. In Claude Code:
+
+```
+/plugin marketplace add Sun-Wukhan/bumper-cars-plugin
+/plugin install bumper-cars
+```
+
+**Requirements:** Claude Code with plugin support, and Node.js on your
+PATH (the plugin's hooks and bridge are zero-dependency Node scripts).
+
+What happens once it's installed:
+
+| Claude event                    | What happens                                                                 |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| You submit a prompt             | The game opens in your browser and auto-joins Quick Match on the public server. |
+| Claude needs your attention (notification / permission request) | The game shows a blocking **"✋ Claude needs you — check your terminal"** overlay and pauses your inputs until you've dealt with it. |
+| The turn finishes               | A **"✅ Your code is ready"** banner appears; you can finish your round.      |
+| Any time                        | Type `/bumper` to open the game manually.                                    |
+
+Under the hood: plugin hooks (`plugins/bumper-cars/hooks/hooks.json`)
+record the agent's status in a local state file, and a tiny local bridge
+(bound to 127.0.0.1 only) serves the game page and that status to the
+browser, which polls it once a second. No code, prompts or tool output
+ever leave your machine — see `plugins/bumper-cars/README.md` for the
+full design and privacy notes.
+
+Environment variables (set them before starting Claude Code):
+
+| Variable         | Default                               | Meaning                                        |
+| ---------------- | ------------------------------------- | ---------------------------------------------- |
+| `BUMPER_PORT`    | `37173`                               | Preferred port for the local bridge.           |
+| `BUMPER_NAME`    | your OS username                      | Player name for auto-join.                     |
+| `BUMPER_NO_OPEN` | *(unset)*                             | If set, never open a browser window automatically. |
+| `BUMPER_SERVER`  | `wss://bumper-cars-gfye.onrender.com` | Multiplayer server to connect to (self-hosting). |
+
+Uninstall:
+
+```
+/plugin uninstall bumper-cars
+```
+
+Phase 1 is hooks + bridge, as above. An in-terminal Mod UI (a game view
+inside Claude Code's own interface, using the newer Mods API) is a
+**later phase** and is not part of this plugin yet.
+
 ## Architecture
 
 ```
@@ -46,6 +103,10 @@ client/index.html        vanilla JS + canvas, no dependencies. Renders server sn
 server/server.js         Node + `ws`. AUTHORITATIVE: owns physics, scoring, timers, bots.
                          Also serves client/index.html at GET / and {"ok":true} at GET /health.
 render.yaml              Render Blueprint: one free web service for the whole game.
+.claude-plugin/marketplace.json
+                         turns this repo into a Claude Code plugin marketplace.
+plugins/bumper-cars/     the real Claude Code plugin (phase 1: hooks + local bridge,
+                         bundled client copy, /bumper command). See its README.
 plugin-shells/vscode/    stub VS Code extension: opens the client in a webview panel.
 plugin-shells/claude-mod/ stub Claude Code plugin (manifest + hooks) for the ui.render pane route.
 plugin-shells/codex/     stub Codex hooks (signal only — Codex hooks can't draw UI).
@@ -201,6 +262,6 @@ friend outside your network to connect.
 
 - Full snapshots at 20 Hz, no delta compression or client prediction/interpolation — fine at this scale, would want interpolation for a polished feel.
 - No accounts, persistence, or anti-cheat beyond server authority; scores live only for the round.
-- Plugin shells are honest stubs (see their READMEs), not published extensions.
+- The shells under `plugin-shells/` are honest stubs (see their READMEs), not published extensions. The Claude Code plugin under `plugins/bumper-cars/` is real (phase 1, hooks + bridge), but it has been validated by simulating hook events and driving the bridge directly — not by installing it into a live Claude Code, because the Claude CLI is not available in the environment where it was built.
 - The 90 s timer expiry itself was not waited out end-to-end in automated tests, but the results broadcast + round reset it triggers is the same `endRound` path now verified via the early-end (last-car-standing) tests.
 - Client visuals (car rendering, damage smoke/flames, mobile layout) are code-reviewed and syntax-checked but not yet visually verified in a real browser — that check belongs with the deploy step.

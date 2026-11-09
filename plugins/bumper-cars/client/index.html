@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Bumper Cars — while your code generates</title>
+<style>
+ body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;text-align:center}
+ #wrap{max-width:860px;margin:0 auto;padding:10px}
+ button,input{font-size:16px;padding:10px 14px;margin:4px;border-radius:8px;border:1px solid #555}
+ button{background:#2ecc71;color:#111;font-weight:700;cursor:pointer}
+ #hud{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}
+ #scores{text-align:left;min-width:180px;font-size:14px;line-height:1.5}
+ .hidden{display:none}
+ #roomCode{font-size:28px;letter-spacing:4px;color:#f39c12;font-weight:800}
+
+ /* --- in-game layout: fit one screen, no scrolling while playing --- */
+ body.ingame{overscroll-behavior:none}
+ body.ingame h1{display:none}
+ body.ingame #wrap{padding:4px}
+ #game{display:none}
+ body.ingame #game{display:flex;flex-direction:column;height:100dvh;box-sizing:border-box}
+ #game .hint{margin:4px 0;font-size:13px;opacity:.8}
+ canvas{background:#1b2430;border-radius:50%;touch-action:none;margin:0 auto;flex:0 0 auto;
+   width:min(94vw, calc(100dvh - 250px), 700px);height:min(94vw, calc(100dvh - 250px), 700px)}
+ body:not(.touch) canvas{width:min(92vw, calc(100dvh - 190px), 760px);height:min(92vw, calc(100dvh - 190px), 760px)}
+
+ /* --- banners --- */
+ #outBanner{background:#7b241c;border:2px solid #e74c3c;border-radius:10px;padding:8px 12px;
+   margin:6px auto;font-weight:700;max-width:640px}
+ #resultsPanel{background:#1e2a38;border:2px solid #f39c12;border-radius:12px;padding:10px 14px;
+   margin:6px auto;max-width:520px;text-align:left}
+ #resultsPanel h2{margin:2px 0 6px;text-align:center}
+ #resultsPanel .row{display:flex;justify-content:space-between;gap:10px;padding:2px 0}
+ #resultsPanel button{display:block;margin:8px auto 2px}
+ #outBanner button{margin:6px 4px 2px}
+ #outSpectating{font-weight:400;font-size:14px;opacity:.9}
+
+ /* --- Claude status overlays (bridge mode) --- */
+ #attentionOverlay{position:fixed;top:0;left:0;right:0;z-index:60;background:#c0392b;color:#fff;
+   font-size:20px;font-weight:800;padding:16px 12px;border-bottom:4px solid #7b241c;
+   box-shadow:0 4px 18px rgba(0,0,0,.5)}
+ #doneBanner{position:fixed;top:0;left:0;right:0;z-index:55;background:#1e8449;color:#fff;
+   font-size:16px;font-weight:700;padding:10px 12px;border-bottom:3px solid #145a32}
+
+ /* --- two-thumb touch controls --- */
+ .touchbar{display:none}
+ body.touch .touchbar{display:flex;justify-content:space-between;align-items:flex-end;
+   gap:10px;padding:8px 6px calc(8px + env(safe-area-inset-bottom));touch-action:none;
+   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+ .tcluster{display:flex;gap:10px;align-items:flex-end}
+ .tbtn{width:76px;height:76px;border-radius:50%;font-size:28px;line-height:1;margin:0;
+   background:#2c3e50;color:#eee;border:2px solid #7f8c8d;touch-action:none;
+   display:flex;align-items:center;justify-content:center;padding:0}
+ .tbtn small{font-size:11px;font-weight:800;letter-spacing:.5px}
+ .tbtn.gas{background:#1e8449;border-color:#2ecc71;height:88px;width:88px}
+ .tbtn.brake{background:#7b241c;border-color:#e74c3c}
+ .tbtn.active{filter:brightness(1.7);transform:scale(.94)}
+</style></head><body><div id="wrap">
+<h1>🏎️ Bumper Cars</h1>
+<div id="join">
+ <p>Play while Claude / Codex generates. Real people can join your room.</p>
+ <input id="name" placeholder="Your name" maxlength="16" value="">
+ <div><button id="quick">Quick Match</button></div>
+ <div><input id="code" placeholder="ROOM CODE" maxlength="4" style="text-transform:uppercase;width:120px">
+ <button id="joinCode">Join by code</button></div>
+ <p id="err" style="color:#e74c3c"></p>
+</div>
+<div id="game" class="hidden">
+ <div id="attentionOverlay" class="hidden">✋ Claude needs you — check your terminal</div>
+ <div id="doneBanner" class="hidden">✅ Your code is ready — this turn finished</div>
+ <div id="hud"><div>Room: <span id="roomCode"></span><br><small>Share this code to play together</small></div>
+ <div>⏱️ <span id="timer">90</span>s</div><div id="scores"></div></div>
+ <div id="outBanner" class="hidden">
+  <div>💥 You're out</div>
+  <div id="outChoices">
+   <button id="outNewGame">▶ Play a new game</button>
+   <button id="outSpectate">Keep spectating</button>
+  </div>
+  <div id="outSpectating" class="hidden">👀 Spectating — you're back in next round, or jump out any time from the results panel</div>
+ </div>
+ <div id="resultsPanel" class="hidden"></div>
+ <canvas id="cv" width="800" height="800"></canvas>
+ <p class="hint">Arrows / WASD, thumb buttons, or drag on the arena to drive. Bump others fast for points — wreck them or push them out of the circle (+25) to knock them out!</p>
+ <div class="touchbar" id="touchbar">
+   <div class="tcluster">
+     <button class="tbtn" data-k="left" aria-label="Steer left">◀</button>
+     <button class="tbtn" data-k="right" aria-label="Steer right">▶</button>
+   </div>
+   <div class="tcluster">
+     <button class="tbtn brake" data-k="down" aria-label="Brake / reverse"><span>▼<br><small>BRAKE</small></span></button>
+     <button class="tbtn gas" data-k="up" aria-label="Accelerate"><span>▲<br><small>GAS</small></span></button>
+   </div>
+ </div>
+</div></div>
+<script>
+const params = new URLSearchParams(location.search);
+// Server address resolution, in order:
+//   1. ?server= in the URL always wins (dev / LAN override, and the way the
+//      Claude plugin's bridge opener points the page at the real server).
+//   2. Page served over https: -> same origin over wss: (e.g. the game
+//      server itself serving this page, local single-port run or Render).
+//   3. Page served from localhost / 127.0.0.1 (the Claude plugin bridge, or
+//      a local dev server): the LOCAL page is not a game server, so use
+//      the public multiplayer server.
+//   4. Page served over plain http: from another host -> same origin ws:.
+//   5. file:// page -> local dev server.
+const PUBLIC_SERVER='wss://bumper-cars-gfye.onrender.com';
+function defaultServer(){
+  if (params.get('server')) return params.get('server');
+  if (location.protocol === 'https:') return 'wss://' + location.host;
+  const host = location.hostname;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1') return PUBLIC_SERVER;
+  if (location.protocol === 'http:') return 'ws://' + location.host;
+  return 'ws://localhost:8787';
+}
+const SERVER = defaultServer();
+// Touch UI on devices that actually have touch / a coarse pointer.
+if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window)) {
+  document.body.classList.add('touch');
+}
+let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
+let agentStatus='idle'; // Claude status from the local bridge ('idle' when not in bridge mode)
+let currentRoom=null, joinedName='Player', spectateChosen=false;
+// Three independent input sources, OR-ed together every send tick:
+// keyboard, on-screen thumb buttons, canvas drag joystick.
+const kb={up:false,down:false,left:false,right:false};
+const btn={up:false,down:false,left:false,right:false};
+const joy={up:false,down:false,left:false,right:false};
+function currentKeys(){
+  return { up: kb.up||btn.up||joy.up, down: kb.down||btn.down||joy.down,
+           left: kb.left||btn.left||joy.left, right: kb.right||btn.right||joy.right };
+}
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+
+// --- crisp rendering: backing store follows CSS size x devicePixelRatio,
+// --- drawing happens in the 800-unit logical space via a transform. ---
+function fitCanvas(){
+  const r=cv.getBoundingClientRect();
+  if (!r.width) return;
+  const dpr=window.devicePixelRatio||1;
+  const px=Math.max(200, Math.round(r.width*dpr));
+  if (cv.width!==px){ cv.width=px; cv.height=px; if(state)render(); }
+}
+addEventListener('resize',fitCanvas);
+addEventListener('orientationchange',()=>setTimeout(fitCanvas,60));
+
+// --- input sender: exactly ONE interval for the page's lifetime ---
+// While the bridge reports 'attention' (Claude is asking the user
+// something) ALL inputs are forced to false — the car coasts to a stop
+// no matter what the player is holding.
+setInterval(()=>{ if(ws&&ws.readyState===1){
+  const keys = agentStatus==='attention' ? {up:false,down:false,left:false,right:false} : currentKeys();
+  ws.send(JSON.stringify({type:'input',keys}));
+} },50);
+
+// --- Claude bridge status polling (plugin mode only) ---
+// Active only when this page was served from localhost / 127.0.0.1, i.e.
+// by the plugin's local bridge. Polls GET /status (same origin) every
+// second and drives the two status overlays:
+//   attention -> blocking "Claude needs you" overlay + inputs paused
+//   done      -> "your code is ready" banner
+//   busy/idle -> both hidden
+// After 3 consecutive failures it assumes this is not bridge mode after
+// all, stops polling and never shows the overlays.
+(function(){
+  const host=location.hostname;
+  if (!(host==='localhost'||host==='127.0.0.1'||host==='[::1]'||host==='::1')) return;
+  let failures=0;
+  const timer=setInterval(async ()=>{
+    try{
+      const r=await fetch('/status',{cache:'no-store'});
+      if(!r.ok) throw new Error('status '+r.status);
+      const s=await r.json();
+      failures=0;
+      agentStatus=s.agent||'idle';
+      document.getElementById('attentionOverlay').classList.toggle('hidden', agentStatus!=='attention');
+      document.getElementById('doneBanner').classList.toggle('hidden', agentStatus!=='done');
+    }catch(e){
+      failures++;
+      if (failures>=3){ clearInterval(timer); agentStatus='idle';
+        document.getElementById('attentionOverlay').classList.add('hidden');
+        document.getElementById('doneBanner').classList.add('hidden'); }
+    }
+  },1000);
+})();
+
+function connect(room, opts={}){
+  if (ws) { try{ws.close();}catch(e){} }
+  // The player keeps the name they joined with across "Play a new game"
+  // hops; the join-screen input only seeds it on the first connect.
+  joinedName = opts.name || document.getElementById('name').value || joinedName || 'Player';
+  ws=new WebSocket(SERVER);
+  ws.onopen=()=>ws.send(JSON.stringify({type:'join',name:joinedName,room:room||undefined,
+    exclude:(!room && opts.exclude) ? opts.exclude : undefined}));
+  ws.onmessage=(ev)=>{const m=JSON.parse(ev.data);
+    if(m.type==='welcome'){myId=m.id; currentRoom=m.room; spectateChosen=false;
+      document.getElementById('roomCode').textContent=m.room;
+      document.getElementById('join').classList.add('hidden');document.getElementById('game').classList.remove('hidden');
+      document.body.classList.add('ingame'); fitCanvas();}
+    if(m.type==='state'){state=m; if(resultsShown && performance.now()-resultsShownAt>6000){resultsShown=false;document.getElementById('resultsPanel').classList.add('hidden');} render();}
+    if(m.type==='results'){showResults(m);}
+    if(m.type==='error'){document.getElementById('err').textContent=m.message;}
+  };
+  ws.onclose=()=>{document.getElementById('err').textContent='Disconnected from server';};
+}
+document.getElementById('quick').onclick=()=>connect('');
+document.getElementById('joinCode').onclick=()=>connect(document.getElementById('code').value.trim().toUpperCase());
+
+// --- auto-join (Claude plugin bridge opener): ?auto=1 joins immediately,
+// with ?name= preset and ?room=CODE to join a specific room (otherwise
+// Quick Match). No click needed.
+if (params.get('auto')==='1'){
+  const n=params.get('name'); if (n) document.getElementById('name').value=n;
+  connect((params.get('room')||'').trim().toUpperCase());
+}
+
+// --- "Play a new game": leave this match and quick-match into a DIFFERENT
+// room (the current room code goes as `exclude`, so the matchmaker can
+// never drop us straight back here). Closing the old socket is enough on
+// the server side: bot takeover keeps our old car playing as a bot.
+// Exactly one socket exists at a time (connect() closes the previous one)
+// and the single page-lifetime input interval just follows the new socket.
+function playNewGame(){
+  resultsShown=false; spectateChosen=false; state=null;
+  document.getElementById('resultsPanel').classList.add('hidden');
+  document.getElementById('outBanner').classList.add('hidden');
+  for (const src of [kb,btn,joy]) for (const k in src) src[k]=false;
+  connect('', { exclude: currentRoom||undefined, name: joinedName });
+}
+document.getElementById('outNewGame').onclick=playNewGame;
+document.getElementById('outSpectate').onclick=()=>{
+  spectateChosen=true; // per-round choice: render() keeps the banner minimal until the next round/elimination
+  const me=state&&state.cars.find(c=>c.id===myId); updateOutBanner(me);
+};
+
+// Out banner: full choice while undecided; once the player picks
+// "Keep spectating" it collapses to a minimal spectating note and STAYS
+// that way (render() calls this every state tick — the choice is tracked
+// in `spectateChosen`, reset when the player is alive again / rejoins).
+function updateOutBanner(me){
+  const banner=document.getElementById('outBanner');
+  if (!(me&&me.eliminated)){ banner.classList.add('hidden'); return; }
+  banner.classList.remove('hidden');
+  document.getElementById('outChoices').classList.toggle('hidden', spectateChosen);
+  document.getElementById('outSpectating').classList.toggle('hidden', !spectateChosen);
+}
+
+function showResults(m){
+  resultsShown=true; resultsShownAt=performance.now();
+  const p=document.getElementById('resultsPanel');
+  const reason=c=>c.eliminated?(c.elimReason==='ring_out'?'OUT ⤴ ring-out':'OUT 💥 wrecked'):'';
+  let html='<h2>🏁 Round over</h2>';
+  html+= m.winner
+    ? `<div style="text-align:center;font-size:18px">🏆 <b>${m.winner.name}</b> wins with ${m.winner.score} pts</div>`
+    : '<div style="text-align:center">No winner</div>';
+  html+= m.standings.map((c,i)=>`<div class="row"><span>${i+1}. <span style="color:${'#eee'}">${c.name}</span>${c.isBot?' 🤖':''} ${reason(c)}</span><span>${c.score} pts</span></div>`).join('');
+  html+='<button id="resultsNewGame">▶ Play a new game</button><button id="resultsClose">Close</button>';
+  p.innerHTML=html; p.classList.remove('hidden');
+  document.getElementById('resultsClose').onclick=()=>{p.classList.add('hidden');resultsShown=false;};
+  document.getElementById('resultsNewGame').onclick=playNewGame;
+}
+
+// --- keyboard ---
+const keymap={ArrowUp:'up',KeyW:'up',ArrowDown:'down',KeyS:'down',ArrowLeft:'left',KeyA:'left',ArrowRight:'right',KeyD:'right'};
+addEventListener('keydown',e=>{ if(e.target&&e.target.tagName==='INPUT')return;
+  if(keymap[e.code]){kb[keymap[e.code]]=true;e.preventDefault();}});
+addEventListener('keyup',e=>{ if(keymap[e.code]){kb[keymap[e.code]]=false;e.preventDefault();}});
+
+// --- thumb buttons: per-button pointer tracking (multi-touch safe) ---
+document.querySelectorAll('.tbtn').forEach(b=>{
+  const k=b.dataset.k, held=new Set();
+  const sync=()=>{ btn[k]=held.size>0; b.classList.toggle('active',held.size>0); };
+  b.addEventListener('pointerdown',e=>{ e.preventDefault(); try{b.setPointerCapture(e.pointerId);}catch(err){} held.add(e.pointerId); sync(); });
+  const release=e=>{ if(held.delete(e.pointerId)) sync(); };
+  b.addEventListener('pointerup',release);
+  b.addEventListener('pointercancel',release);
+  b.addEventListener('lostpointercapture',release);
+  b.addEventListener('contextmenu',e=>e.preventDefault());
+});
+document.getElementById('touchbar').addEventListener('contextmenu',e=>e.preventDefault());
+
+// --- canvas drag joystick: drag direction = drive direction ---
+let joyPointer=null, joyOrigin=null, joyNow=null;
+function canvasPoint(e){ const r=cv.getBoundingClientRect();
+  return { x:(e.clientX-r.left)/r.width*800, y:(e.clientY-r.top)/r.height*800 }; }
+cv.addEventListener('pointerdown',e=>{ if(joyPointer!==null)return;
+  joyPointer=e.pointerId; try{cv.setPointerCapture(e.pointerId);}catch(err){}
+  joyOrigin=canvasPoint(e); joyNow=joyOrigin; e.preventDefault(); });
+cv.addEventListener('pointermove',e=>{ if(e.pointerId!==joyPointer)return;
+  joyNow=canvasPoint(e);
+  const dx=joyNow.x-joyOrigin.x, dy=joyNow.y-joyOrigin.y, T=22; // 800-space px ≈ screen threshold
+  joy.left=dx<-T; joy.right=dx>T; joy.up=dy<-T; joy.down=dy>T;
+  if(state)render(); });
+function joyEnd(e){ if(e.pointerId!==joyPointer)return;
+  joyPointer=null; joyOrigin=null; joyNow=null;
+  joy.up=joy.down=joy.left=joy.right=false; if(state)render(); }
+cv.addEventListener('pointerup',joyEnd);
+cv.addEventListener('pointercancel',joyEnd);
+cv.addEventListener('lostpointercapture',joyEnd);
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+
+// --- drawing helpers ---
+function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function healthColor(h){ return h>50?'#2ecc71':(h>25?'#f39c12':'#e74c3c'); }
+
+function drawCar(c,now){
+  const S=400;
+  // Eliminated (rung-out) cars sit outside the arena in world coordinates —
+  // clamp their wreck to the rim so it stays visible instead of off-canvas.
+  let dx=c.x, dy=c.y;
+  if (c.eliminated && state && state.arena){
+    const d=Math.hypot(dx,dy), max=state.arena.radius+14;
+    if (d>max){ dx=dx/d*max; dy=dy/d*max; }
+  }
+  const x=S+dx, y=S+dy;
+  const hp=c.health==null?100:c.health;
+  // name + health bar (unrotated, above the car; label clamped on-canvas)
+  const lx=Math.max(56,Math.min(744,x));
+  const boosted=(c.boostLeft||0)>0 && !c.eliminated;
+  ctx.fillStyle='#fff'; ctx.font='12px system-ui'; ctx.textAlign='center';
+  ctx.fillText(c.name+(c.id===myId?' (you)':'')+(boosted?' ⚡'+Math.ceil(c.boostLeft)+'s':''),lx,y-44);
+  if (!c.eliminated){
+    ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(lx-22,y-38,44,6);
+    ctx.fillStyle=healthColor(hp); ctx.fillRect(lx-22,y-38,44*Math.max(0,hp)/100,6);
+  }
+  ctx.save(); ctx.translate(x,y); ctx.rotate(c.angle);
+  if (c.eliminated){
+    // grey wreck: desaturated crumpled body with an X
+    ctx.fillStyle='#5d6d7e'; rr(-30,-16,60,32,9); ctx.fill();
+    ctx.lineWidth=2; ctx.strokeStyle='#2c3e50'; ctx.stroke();
+    ctx.fillStyle='#424242'; rr(-10,-11,18,22,4); ctx.fill();
+    ctx.strokeStyle='#e74c3c'; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(-24,-12); ctx.lineTo(24,12); ctx.moveTo(24,-12); ctx.lineTo(-24,12); ctx.stroke();
+    ctx.restore(); return;
+  }
+  // wheels (front pair slightly larger)
+  ctx.fillStyle='#0a0a0a';
+  ctx.fillRect(14,-20,14,7); ctx.fillRect(14,13,14,7);
+  ctx.fillRect(-26,-20,12,7); ctx.fillRect(-26,13,12,7);
+  // body
+  ctx.fillStyle=c.color; rr(-30,-16,60,32,9); ctx.fill();
+  ctx.lineWidth=c.id===myId?4:2; ctx.strokeStyle=c.id===myId?'#ffffff':'rgba(0,0,0,.5)'; ctx.stroke();
+  // centre stripe
+  ctx.fillStyle='rgba(255,255,255,.35)'; ctx.fillRect(-28,-3,56,6);
+  // cabin + windshield
+  ctx.fillStyle='rgba(15,25,40,.9)'; rr(-11,-11,19,22,4); ctx.fill();
+  ctx.fillStyle='rgba(170,220,255,.85)'; ctx.fillRect(9,-11,6,22);
+  // headlights
+  ctx.fillStyle='#ffeaa7'; ctx.beginPath(); ctx.arc(29,-10,3.2,0,7); ctx.arc(29,10,3.2,0,7); ctx.fill();
+  ctx.restore();
+  // boost feedback: exhaust streaks + flame jet behind the car
+  if (boosted){
+    const ca=Math.cos(c.angle), sa=Math.sin(c.angle);
+    const flick=1+0.3*Math.sin(now/45+(c.id.charCodeAt(1)||0)*3);
+    for (const off of [-11,0,11]){
+      const sx=x-ca*32-sa*off, sy=y-sa*32+ca*off, len=(off===0?22:15)*flick;
+      ctx.strokeStyle=off===0?'rgba(255,217,77,.9)':'rgba(126,214,255,.75)';
+      ctx.lineWidth=off===0?5:3;
+      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(sx-ca*len, sy-sa*len); ctx.stroke();
+    }
+    ctx.fillStyle='#e67e22'; ctx.beginPath();
+    ctx.moveTo(x-ca*30-sa*6, y-sa*30+ca*6); ctx.lineTo(x-ca*(30+18*flick), y-sa*(30+18*flick));
+    ctx.lineTo(x-ca*30+sa*6, y-sa*30-ca*6); ctx.closePath(); ctx.fill();
+  }
+  // damage feedback: smoke, then flames when critical (cheap flicker via time)
+  if (hp<50){
+    const t=now/280 + (c.id.charCodeAt(1)||0);
+    ctx.fillStyle='#c9ced6';
+    for(let i=0;i<(hp<25?5:4);i++){
+      const ph=(t+i*0.55)%1, sx=x-Math.cos(c.angle)*26+Math.sin(t*3+i)*5, sy=y-Math.sin(c.angle)*26-ph*16;
+      ctx.beginPath(); ctx.arc(sx,sy,6+ph*11,0,7); ctx.globalAlpha=.85*(1-ph*.6); ctx.fill(); ctx.globalAlpha=1;
+    }
+    if (hp<25){
+      const f=1+0.35*Math.sin(now/60+(c.id.charCodeAt(1)||0)*2);
+      ctx.fillStyle='#e67e22'; ctx.beginPath();
+      ctx.moveTo(x-30,y); ctx.lineTo(x-30-13*f,y-6); ctx.lineTo(x-30-19*f,y); ctx.lineTo(x-30-13*f,y+6); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='#f1c40f'; ctx.beginPath();
+      ctx.moveTo(x-30,y); ctx.lineTo(x-30-8*f,y-3.5); ctx.lineTo(x-30-12*f,y); ctx.lineTo(x-30-8*f,y+3.5); ctx.closePath(); ctx.fill();
+    }
+  }
+}
+
+function render(){
+  if(!state)return;
+  const unit=cv.width/800; ctx.setTransform(unit,0,0,unit,0,0);
+  document.getElementById('timer').textContent=state.timeLeft;
+  const sorted=[...state.cars].sort((a,b)=>b.score-a.score);
+  document.getElementById('scores').innerHTML='<b>Scores</b><br>'+sorted.map(c=>{
+    const hp=c.health==null?100:c.health;
+    const status=c.eliminated
+      ? (c.elimReason==='ring_out'?' <b style="color:#e74c3c">OUT ⤴ ring-out</b>':' <b style="color:#e74c3c">OUT 💥 wrecked</b>')
+      : ` · <span style="color:${healthColor(hp)}">❤ ${hp}%</span>`;
+    return `<span style="color:${c.color}">●</span> ${c.name}${c.id===myId?' (you)':''}${c.isBot?' 🤖':''}: ${c.score}${status}`;
+  }).join('<br>');
+  const me=state.cars.find(c=>c.id===myId);
+  if (me && !me.eliminated) spectateChosen=false; // alive again (new round): the choice resets
+  updateOutBanner(me);
+  const S=400, R=state.arena.radius, now=performance.now();
+  ctx.clearRect(0,0,800,800);
+  ctx.beginPath();ctx.arc(S,S,R,0,7);ctx.fillStyle='#24344d';ctx.fill();ctx.lineWidth=6;ctx.strokeStyle='#f39c12';ctx.stroke();
+  // power-up tokens: glowing golden orbs with a ⚡, gently pulsing
+  for (const p of (state.powerups||[])){
+    const px=S+p.x, py=S+p.y, pulse=1+0.15*Math.sin(now/280);
+    ctx.globalAlpha=.35; ctx.fillStyle='#f1c40f';
+    ctx.beginPath(); ctx.arc(px,py,21*pulse,0,7); ctx.fill(); ctx.globalAlpha=1;
+    ctx.fillStyle='#ffd94d'; ctx.beginPath(); ctx.arc(px,py,13*pulse,0,7); ctx.fill();
+    ctx.lineWidth=2; ctx.strokeStyle='#b9770e'; ctx.stroke();
+    ctx.font='15px system-ui'; ctx.textAlign='center'; ctx.fillText('⚡',px,py+5);
+  }
+  for(const c of state.cars) drawCar(c,now);
+  // joystick indicator
+  if (joyPointer!==null&&joyOrigin&&joyNow){
+    ctx.strokeStyle='rgba(255,255,255,.6)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(joyOrigin.x,joyOrigin.y,26,0,7); ctx.stroke();
+    const dx=joyNow.x-joyOrigin.x, dy=joyNow.y-joyOrigin.y, d=Math.hypot(dx,dy)||1, cl=Math.min(d,26);
+    ctx.fillStyle='rgba(255,255,255,.75)';
+    ctx.beginPath(); ctx.arc(joyOrigin.x+dx/d*cl, joyOrigin.y+dy/d*cl, 12, 0, 7); ctx.fill();
+  }
+}
+</script></body></html>

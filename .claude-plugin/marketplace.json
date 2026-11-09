@@ -1,0 +1,1 @@
+{"name":"bumper-cars","owner":{"name":"Navid Khan"},"plugins":[{"description":"Play multiplayer bumper cars while Claude generates code","name":"bumper-cars","source":"./plugins/bumper-cars","version":"0.1.0"}]}

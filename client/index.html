@@ -34,6 +34,13 @@
  #outBanner button{margin:6px 4px 2px}
  #outSpectating{font-weight:400;font-size:14px;opacity:.9}
 
+ /* --- Claude status overlays (bridge mode) --- */
+ #attentionOverlay{position:fixed;top:0;left:0;right:0;z-index:60;background:#c0392b;color:#fff;
+   font-size:20px;font-weight:800;padding:16px 12px;border-bottom:4px solid #7b241c;
+   box-shadow:0 4px 18px rgba(0,0,0,.5)}
+ #doneBanner{position:fixed;top:0;left:0;right:0;z-index:55;background:#1e8449;color:#fff;
+   font-size:16px;font-weight:700;padding:10px 12px;border-bottom:3px solid #145a32}
+
  /* --- two-thumb touch controls --- */
  .touchbar{display:none}
  body.touch .touchbar{display:flex;justify-content:space-between;align-items:flex-end;
@@ -58,6 +65,8 @@
  <p id="err" style="color:#e74c3c"></p>
 </div>
 <div id="game" class="hidden">
+ <div id="attentionOverlay" class="hidden">✋ Claude needs you — check your terminal</div>
+ <div id="doneBanner" class="hidden">✅ Your code is ready — this turn finished</div>
  <div id="hud"><div>Room: <span id="roomCode"></span><br><small>Share this code to play together</small></div>
  <div>⏱️ <span id="timer">90</span>s</div><div id="scores"></div></div>
  <div id="outBanner" class="hidden">
@@ -84,15 +93,23 @@
 </div></div>
 <script>
 const params = new URLSearchParams(location.search);
-// Server address: explicit ?server= override wins (dev/LAN use). Otherwise,
-// if this page was served over http(s) by the game server itself (local
-// single-port run or Render), connect back to the SAME origin over ws/wss.
-// Opened as a file:// page, fall back to the local dev server.
+// Server address resolution, in order:
+//   1. ?server= in the URL always wins (dev / LAN override, and the way the
+//      Claude plugin's bridge opener points the page at the real server).
+//   2. Page served over https: -> same origin over wss: (e.g. the game
+//      server itself serving this page, local single-port run or Render).
+//   3. Page served from localhost / 127.0.0.1 (the Claude plugin bridge, or
+//      a local dev server): the LOCAL page is not a game server, so use
+//      the public multiplayer server.
+//   4. Page served over plain http: from another host -> same origin ws:.
+//   5. file:// page -> local dev server.
+const PUBLIC_SERVER='wss://bumper-cars-gfye.onrender.com';
 function defaultServer(){
   if (params.get('server')) return params.get('server');
-  if (location.protocol === 'http:' || location.protocol === 'https:') {
-    return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
-  }
+  if (location.protocol === 'https:') return 'wss://' + location.host;
+  const host = location.hostname;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1') return PUBLIC_SERVER;
+  if (location.protocol === 'http:') return 'ws://' + location.host;
   return 'ws://localhost:8787';
 }
 const SERVER = defaultServer();
@@ -101,6 +118,7 @@ if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchsta
   document.body.classList.add('touch');
 }
 let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
+let agentStatus='idle'; // Claude status from the local bridge ('idle' when not in bridge mode)
 let currentRoom=null, joinedName='Player', spectateChosen=false;
 // Three independent input sources, OR-ed together every send tick:
 // keyboard, on-screen thumb buttons, canvas drag joystick.
@@ -126,7 +144,44 @@ addEventListener('resize',fitCanvas);
 addEventListener('orientationchange',()=>setTimeout(fitCanvas,60));
 
 // --- input sender: exactly ONE interval for the page's lifetime ---
-setInterval(()=>{ if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'input',keys:currentKeys()})); },50);
+// While the bridge reports 'attention' (Claude is asking the user
+// something) ALL inputs are forced to false — the car coasts to a stop
+// no matter what the player is holding.
+setInterval(()=>{ if(ws&&ws.readyState===1){
+  const keys = agentStatus==='attention' ? {up:false,down:false,left:false,right:false} : currentKeys();
+  ws.send(JSON.stringify({type:'input',keys}));
+} },50);
+
+// --- Claude bridge status polling (plugin mode only) ---
+// Active only when this page was served from localhost / 127.0.0.1, i.e.
+// by the plugin's local bridge. Polls GET /status (same origin) every
+// second and drives the two status overlays:
+//   attention -> blocking "Claude needs you" overlay + inputs paused
+//   done      -> "your code is ready" banner
+//   busy/idle -> both hidden
+// After 3 consecutive failures it assumes this is not bridge mode after
+// all, stops polling and never shows the overlays.
+(function(){
+  const host=location.hostname;
+  if (!(host==='localhost'||host==='127.0.0.1'||host==='[::1]'||host==='::1')) return;
+  let failures=0;
+  const timer=setInterval(async ()=>{
+    try{
+      const r=await fetch('/status',{cache:'no-store'});
+      if(!r.ok) throw new Error('status '+r.status);
+      const s=await r.json();
+      failures=0;
+      agentStatus=s.agent||'idle';
+      document.getElementById('attentionOverlay').classList.toggle('hidden', agentStatus!=='attention');
+      document.getElementById('doneBanner').classList.toggle('hidden', agentStatus!=='done');
+    }catch(e){
+      failures++;
+      if (failures>=3){ clearInterval(timer); agentStatus='idle';
+        document.getElementById('attentionOverlay').classList.add('hidden');
+        document.getElementById('doneBanner').classList.add('hidden'); }
+    }
+  },1000);
+})();
 
 function connect(room, opts={}){
   if (ws) { try{ws.close();}catch(e){} }
@@ -149,6 +204,14 @@ function connect(room, opts={}){
 }
 document.getElementById('quick').onclick=()=>connect('');
 document.getElementById('joinCode').onclick=()=>connect(document.getElementById('code').value.trim().toUpperCase());
+
+// --- auto-join (Claude plugin bridge opener): ?auto=1 joins immediately,
+// with ?name= preset and ?room=CODE to join a specific room (otherwise
+// Quick Match). No click needed.
+if (params.get('auto')==='1'){
+  const n=params.get('name'); if (n) document.getElementById('name').value=n;
+  connect((params.get('room')||'').trim().toUpperCase());
+}
 
 // --- "Play a new game": leave this match and quick-match into a DIFFERENT
 // room (the current room code goes as `exclude`, so the matchmaker can

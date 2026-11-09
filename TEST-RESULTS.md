@@ -336,3 +336,90 @@ GET /       -> 200, 19,783 bytes; markers present: outNewGame ×2, outSpectate �
   bot-specific pickup was staged).
 - The natural 8–15 s spawn cadence over a full round (the spawner was
   verified via the shortened-timer hook instead of real-time waits).
+
+---
+
+# Fourth pass — Claude Code plugin (hooks + bridge), 2026-11-09
+
+New surface: repo-root marketplace (`.claude-plugin/marketplace.json`),
+the plugin at `plugins/bumper-cars/` (manifest, `hooks/hooks.json`,
+zero-dependency `scripts/hook.js` + `scripts/bridge.js`, `commands/bumper.md`,
+bundled `client/index.html`), plus client additions (auto-join, bridge
+status polling with attention/done overlays, paused input on attention,
+localhost → public-server fallback). All local: no push, no deploy, no
+Claude install (the `claude` CLI is not available in this environment, so
+hook events were simulated by invoking `hook.js` directly with the exact
+arguments `hooks.json` uses, and the browser-open call itself — suppressed
+here with `BUMPER_NO_OPEN=1` — was not executed against a real browser).
+
+## JSON validity + syntax
+
+```
+JSON OK: .claude-plugin/marketplace.json
+JSON OK: plugins/bumper-cars/.claude-plugin/plugin.json
+JSON OK: plugins/bumper-cars/hooks/hooks.json
+node --check OK: hook.js / bridge.js / server.js / tests
+node --check OK: client inline script (main) and (plugin copy)
+client copies byte-identical: client/index.html == plugins/bumper-cars/client/index.html (cmp)
+```
+
+## Game suite (client changes must not break it)
+
+```
+node tests/multiplayer.test.js -> TOTAL: 23/23 passed
+```
+(All 23 pre-existing checks, including boosts and exclusions — see the
+earlier sections for the full list.)
+
+## Hook simulation (temp HOME=/tmp/bc-home.*, BUMPER_PORT=37291, BUMPER_NO_OPEN=1)
+
+State file (`$HOME/.bumper-cars/state.json`) after each invocation —
+exactly the required sequence idle→busy→attention→attention→done:
+
+```
+after session-start      -> {"agent":"idle","event":"session-start",...}
+after user-prompt-submit -> {"agent":"busy","event":"user-prompt-submit",...}
+after notification       -> {"agent":"attention","event":"notification",...}
+after permission-request -> {"agent":"attention","event":"permission-request",...}
+after stop               -> {"agent":"done","event":"stop",...}
+```
+
+The `user-prompt-submit` run also started the bridge with the browser
+suppressed (the documented `BUMPER_NO_OPEN=1` assertion): the spawned
+bridge wrote `{"port":37291,...}` to `bridge.json`,
+`GET http://127.0.0.1:37291/health` -> `{"ok":true}`, and `/status`
+reflected the state file (`done` after the sequence).
+
+PascalCase event names (what `hooks.json` actually passes) verified too:
+`SessionStart`→idle, `PermissionRequest`→attention, `Stop`→done,
+`SessionEnd`→idle.
+
+## Bridge end-to-end (fresh bridge, BUMPER_PORT=37293, temp CLAUDE_PLUGIN_DATA)
+
+```
+bridge log: bumper-cars bridge listening on http://127.0.0.1:37293
+GET /health -> {"ok":true}
+GET /status (no state file) -> {"agent":"idle","event":null,"updatedAt":null}
+GET /       -> 200, 23,067 bytes; served page byte-identical to the
+               plugin's client/index.html; markers: auto x9,
+               attentionOverlay x4, "Claude needs you" x2, doneBanner x4,
+               "Your code is ready" x1, /status x2,
+               bumper-cars-gfye.onrender.com x1
+after hook user-prompt-submit -> /status = {"agent":"busy",...}
+after hook notification       -> /status = {"agent":"attention",...}
+after hook stop               -> /status = {"agent":"done",...}
+GET /nope   -> HTTP 404
+```
+
+## Not tested in this pass (honest)
+
+- Installing the plugin into a real Claude Code (`/plugin marketplace add` /
+  `/plugin install`) and observing hooks fire from Claude itself — the
+  `claude` CLI is not installed here. `hooks.json` follows the documented
+  format and the invoked command line was exercised verbatim by hand.
+- The browser-open call in `hook.js` (platform opener) — never executed
+  without `BUMPER_NO_OPEN` in this sandbox.
+- The client overlays/auto-join in a real browser — the served page is
+  syntax- and byte-checked with all markers present, and the /status
+  values they react to were driven live through the bridge above; the
+  visual behaviour itself belongs to the on-machine install test.
