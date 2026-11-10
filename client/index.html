@@ -124,7 +124,7 @@ const SERVER = defaultServer();
 if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window)) {
   document.body.classList.add('touch');
 }
-const BUILD='2026-11-10-mouse3'; // bump on every client push; shown in the hint line + ?debug=1 readout
+const BUILD='2026-11-10-mouse4'; // bump on every client push; shown in the hint line + ?debug=1 readout
 let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
 let lastDriveKeyAt=0, welcomedAt=0; // focus hint: when did a driving key last register?
 let agentStatus='idle'; // Claude status from the local bridge ('idle' when not in bridge mode)
@@ -390,7 +390,10 @@ cv.addEventListener('pointermove',e=>{
   // a live cursor. Button-held mouse moves track too (drag yields in mouseSteer).
   if(e.buttons!==0 && e.pointerType!=='mouse') return;
   const r=cv.getBoundingClientRect(); if(!r.width) return;
-  mousePt={ x:(e.clientX-r.left)/r.width*800, y:(e.clientY-r.top)/r.height*800 };
+  // State coords are CENTRE-origin (-400..400); the canvas maps them with
+  // a +400 offset. Store the cursor in the same space or the car steers to
+  // a phantom point 400,400 away (mouse3 bug — it drove out of the ring).
+  mousePt={ x:(e.clientX-r.left)/r.width*800-400, y:(e.clientY-r.top)/r.height*800-400 };
 });
 cv.addEventListener('pointerleave',()=>{ mousePt=null; });
 cv.addEventListener('pointerdown',e=>{ if(joyPointer!==null)return;
