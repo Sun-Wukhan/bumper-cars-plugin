@@ -137,10 +137,10 @@ const joy={up:false,down:false,left:false,right:false};
 // turns toward it and drives while it is more than a car-length away;
 // park the cursor on your own car to stop. Yields to keyboard, thumb
 // buttons and the touch drag-stick whenever those are active.
-let mousePt=null, mouseAt=0;
+let mousePt=null;
 function mouseSteer(){
   const none={up:false,down:false,left:false,right:false};
-  if(!mousePt || performance.now()-mouseAt>3500) return none;
+  if(!mousePt) return none;
   if(kb.up||kb.down||kb.left||kb.right||btn.up||btn.down||btn.left||btn.right) return none;
   if(typeof joyPointer!=='undefined' && joyPointer!==null) return none;
   if(!state||!state.cars) return none;
@@ -183,7 +183,7 @@ setInterval(()=>{ if(ws&&ws.readyState===1){
   // holds the keyboard) and no key is held — the server lets a bot drive
   // the car until the player comes back, instead of leaving it parked.
   if(k.up||k.down||k.left||k.right) lastDriveKeyAt=performance.now();
-  const awayNow=(document.hidden||(document.hasFocus&&!document.hasFocus()))&&!(k.up||k.down||k.left||k.right);
+  const awayNow=(document.hidden||((document.hasFocus&&!document.hasFocus())&&!mousePt))&&!(k.up||k.down||k.left||k.right);
   ws.send(JSON.stringify({type:'input',keys:k,away:awayNow}));
 } },50);
 
@@ -365,8 +365,8 @@ cv.addEventListener('pointermove',e=>{
   if(e.pointerType!=='mouse') return;
   const r=cv.getBoundingClientRect(); if(!r.width) return;
   mousePt={ x:(e.clientX-r.left)/r.width*800, y:(e.clientY-r.top)/r.height*800 };
-  mouseAt=performance.now();
 });
+cv.addEventListener('pointerleave',()=>{ mousePt=null; });
 cv.addEventListener('pointerdown',e=>{ if(joyPointer!==null)return;
   joyPointer=e.pointerId; try{cv.setPointerCapture(e.pointerId);}catch(err){}
   joyOrigin=canvasPoint(e); joyNow=joyOrigin; e.preventDefault(); });
