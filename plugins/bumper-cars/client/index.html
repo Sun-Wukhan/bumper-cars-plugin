@@ -155,21 +155,36 @@ addEventListener('orientationchange',()=>setTimeout(fitCanvas,60));
 // banner (and flags the tab title) but the player keeps driving —
 // Navid explicitly reversed the old freeze-on-attention design.
 setInterval(()=>{ if(ws&&ws.readyState===1){
-  ws.send(JSON.stringify({type:'input',keys:currentKeys()}));
+  const k=currentKeys();
+  // "away": this page cannot be driven right now (hidden, or another app
+  // holds the keyboard) and no key is held — the server lets a bot drive
+  // the car until the player comes back, instead of leaving it parked.
+  const awayNow=(document.hidden||(document.hasFocus&&!document.hasFocus()))&&!(k.up||k.down||k.left||k.right);
+  ws.send(JSON.stringify({type:'input',keys:k,away:awayNow}));
 } },50);
 
-// --- focus hint: never let "the keys went to another window" fail silently.
-// If a round is live, the player is alive, and no driving key has registered
-// for a few seconds, the page almost certainly does not have keyboard focus
-// (macOS sends keys to the frontmost app only) — say so, on screen.
+// --- focus hint: never let "Claude has me" or "the keys went to another
+// window" fail silently. While the player is away (page hidden/unfocused)
+// the server has a bot driving their car — the pill says so. If the page
+// has focus but no driving key has registered for a few seconds in a live
+// round, the pill says how to take over (macOS sends keys to the frontmost
+// app only, so an unanswered Claude prompt can strand them).
+let hintMode='';
 setInterval(()=>{
   const el=document.getElementById('focusHint'); if(!el) return;
   const me=state&&state.cars?state.cars.find(c=>c.id===myId):null;
   const inGame=!document.getElementById('game').classList.contains('hidden');
   const driving=pressedCodes.size>0||btn.up||btn.down||btn.left||btn.right||joy.up||joy.down||joy.left||joy.right;
   const quietFor=performance.now()-Math.max(lastDriveKeyAt||0, welcomedAt||0);
-  const show=inGame&&!!me&&!me.eliminated&&!resultsShown&&!driving&&quietFor>4000;
-  el.classList.toggle('hidden', !show);
+  let mode='';
+  if(inGame&&!!me&&!me.eliminated&&!resultsShown&&me.away) mode='away';
+  else if(inGame&&!!me&&!me.eliminated&&!resultsShown&&!driving&&quietFor>4000) mode='keys';
+  if(mode!==hintMode){
+    hintMode=mode;
+    el.textContent = mode==='away' ? '🤖 A bot is driving for you — click back here to take over'
+      : '⌨️ Click the arena, then hold W or ↑ to drive';
+  }
+  el.classList.toggle('hidden', !mode);
 },500);
 
 // --- Claude bridge status polling (plugin mode only) ---

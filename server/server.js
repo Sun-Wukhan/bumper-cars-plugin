@@ -66,6 +66,7 @@ function makeCar(name, isBot) {
     score: 0, health: MAX_HEALTH, eliminated: false, elimReason: null, boostT: 0,
     input: { up: false, down: false, left: false, right: false },
     lastHitBy: null, lastHitAt: 0, bumpCooldownUntil: 0, outUntil: 0, botSeed: Math.random() * 1000,
+    away: false, // client reports its page hidden/unfocused -> a bot drives this car until the player returns
     botAI: null, // lazily-created bot decision state (see botDrive); server-side only, never snapshotted
   };
 }
@@ -409,7 +410,7 @@ function endRound(room, cause) {
 }
 function stepRoom(room, dt) {
   const now = Date.now();
-  for (const car of room.cars.values()) if (car.isBot && !car.eliminated) botDrive(car, room, dt, now);
+  for (const car of room.cars.values()) if ((car.isBot || car.away) && !car.eliminated) botDrive(car, room, dt, now);
   for (const car of room.cars.values()) stepCar(car, dt);
   const cars = [...room.cars.values()];
   for (let i = 0; i < cars.length; i++) for (let j = i + 1; j < cars.length; j++) resolveCollision(cars[i], cars[j], now);
@@ -447,7 +448,7 @@ function snapshot(room) {
   return {
     type: 'state', room: room.code, arena: { radius: ARENA_R }, timeLeft: Math.max(0, Math.ceil(room.timeLeft)),
     cars: [...room.cars.values()].map(c => ({
-      id: c.id, name: c.name, color: c.color, isBot: c.isBot,
+      id: c.id, name: c.name, color: c.color, isBot: c.isBot, away: !!c.away,
       x: Math.round(c.x * 10) / 10, y: Math.round(c.y * 10) / 10,
       vx: Math.round(c.vx), vy: Math.round(c.vy),
       angle: Math.round(c.angle * 100) / 100, score: c.score,
@@ -513,6 +514,7 @@ function start(port = PORT) {
       } else if (msg.type === 'input') {
         const info = clients.get(ws); if (!info) return;
         const car = info.room.cars.get(info.carId); if (!car || car.isBot || car.eliminated) return; // eliminated humans spectate: input ignored
+        car.away = !!msg.away;
         car.input = normaliseInput(msg);
       }
     });

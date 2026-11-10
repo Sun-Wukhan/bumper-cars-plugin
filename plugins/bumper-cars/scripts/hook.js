@@ -11,11 +11,13 @@
  *      <CLAUDE_PLUGIN_DATA or ~/.bumper-cars>/state.json
  *      { agent: 'idle'|'busy'|'attention'|'done', event, updatedAt }
  *    The local bridge serves that file at GET /status and the game page
- *    polls it to show/hide its overlays and to pause input when Claude
- *    needs the user's attention.
- *  - On UserPromptSubmit (and on the explicit `open` invocation used by
- *    the /bumper command): makes sure the bridge is running, then opens
- *    the game in the default browser (unless BUMPER_NO_OPEN is set).
+ *    polls it to show/hide its overlays and to show a warning banner
+ *    when Claude needs the user's attention (the game never pauses).
+ *  - Only on the explicit `open` invocation (the /bumper command):
+ *    makes sure the bridge is running, then opens the game in the
+ *    default browser (unless BUMPER_NO_OPEN is set). Lifecycle events
+ *    NEVER open a window — opening on every prompt spammed a new tab
+ *    and a new game per prompt (removed Nov 10, 2026, at Navid's word).
  *
  * Privacy: Claude passes a hook payload on stdin. This script NEVER reads,
  * logs, stores or transmits it — the state file contains only the agent
@@ -204,10 +206,6 @@ async function main() {
   const agent = TRANSITIONS[key];
   if (agent) writeState(agent, rawEvent);
 
-  if (key === 'user-prompt-submit' || key === 'userpromptsubmit') {
-    const port = await ensureBridge();
-    openGame(port);
-  }
   // All other events leave the bridge running: it is stateless (it reads
   // the state file fresh per request) and tiny, so there is nothing to
   // clean up at SessionEnd.

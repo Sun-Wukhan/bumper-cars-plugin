@@ -14,8 +14,9 @@ local **bridge**. (An in-terminal Mod UI is a later phase.)
 Two small, zero-dependency Node scripts do everything:
 
 - `scripts/hook.js` — invoked by the plugin's hooks on each lifecycle
-  event. It writes the agent's status to a local state file and, when a
-  turn starts, makes sure the bridge is running and opens the game.
+  event. It only writes the agent's status to a local state file. It
+  never opens anything on its own: the game opens when you run
+  `/bumper` (or not at all, if you just leave a tab open).
 - `scripts/bridge.js` — an http server bound to **127.0.0.1 only**. It
   serves the game page (`client/index.html`, bundled in this plugin) at
   `GET /`, the live agent status at `GET /status` (read fresh from the
@@ -26,7 +27,7 @@ The game page polls `/status` once a second and reacts:
 | Hook event         | State       | What you see / what happens                                             |
 | ------------------ | ----------- | ----------------------------------------------------------------------- |
 | `SessionStart`     | `idle`      | Nothing yet. The bridge starts lazily on your first prompt.             |
-| `UserPromptSubmit` | `busy`      | The game opens in your browser and auto-joins Quick Match.              |
+| `UserPromptSubmit` | `busy`      | Nothing pops up. The status banner updates in the game tab if you have it open. |
 | `Notification`     | `attention` | —                                                                       |
 | `PermissionRequest`| `attention` | A pulsing red **warning banner**: **"⚠️ Claude needs you — check your terminal"**, and the tab title changes to flag it. The game **never pauses** — you keep driving normally; the warning is purely visual and clears when Claude no longer needs you. |
 | `Stop`             | `done`      | Banner: **"✅ Your code is ready — this turn finished"**. Inputs stay live — finish your round. The banner clears on the next turn. |
@@ -82,10 +83,11 @@ directory — `CLAUDE_PLUGIN_DATA` when Claude provides it, otherwise
   live: it clears as soon as the next hook event moves the state out of
   `attention` (answering Claude's prompt leads to `busy`/`done`). You can
   check the raw state at `http://localhost:<port>/status`.
-- **Don't open a browser on every prompt.** Set `BUMPER_NO_OPEN=1` in
-  your environment before starting Claude Code; open the game manually
-  with `/bumper` (with the variable unset in that shell) or by visiting
-  the bridge URL.
+- **The game doesn't open on its own — by design.** Hooks never open a
+  browser window (an earlier version opened a fresh tab and a fresh
+  game on every prompt; that spam was removed). Run `/bumper` when you
+  want to play. `BUMPER_NO_OPEN=1` still suppresses the `/bumper` open
+  if you only want the bridge started.
 - **Wrong player name.** Set `BUMPER_NAME` before starting Claude Code.
 
 ## Uninstall

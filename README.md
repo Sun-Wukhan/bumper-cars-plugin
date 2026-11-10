@@ -81,8 +81,9 @@ What happens once it's installed:
 
 | Claude event                    | What happens                                                                 |
 | ------------------------------- | ---------------------------------------------------------------------------- |
-| You submit a prompt             | The game opens in your browser and auto-joins Quick Match on the public server. |
+| You submit a prompt             | Nothing pops up — the game only opens when you run `/bumper`. Status banners update in the tab if it's already open. |
 | Claude needs your attention (notification / permission request) | The game shows a pulsing **"⚠️ Claude needs you — check your terminal"** warning banner and flags the tab title — but never pauses: you keep driving until you've dealt with it. |
+| You're away answering Claude    | Your page reports itself away and a **bot drives your car** until you click back — you're never left parked as a target. |
 | The turn finishes               | A **"✅ Your code is ready"** banner appears; you can finish your round.      |
 | Any time                        | Type `/bumper` to open the game manually.                                    |
 
