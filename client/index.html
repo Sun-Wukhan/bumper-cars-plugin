@@ -124,7 +124,7 @@ const SERVER = defaultServer();
 if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window)) {
   document.body.classList.add('touch');
 }
-const BUILD='2026-11-10-mouse4'; // bump on every client push; shown in the hint line + ?debug=1 readout
+const BUILD='2026-11-10-mouse5'; // bump on every client push; shown in the hint line + ?debug=1 readout
 let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
 let lastDriveKeyAt=0, welcomedAt=0; // focus hint: when did a driving key last register?
 let agentStatus='idle'; // Claude status from the local bridge ('idle' when not in bridge mode)
@@ -140,21 +140,39 @@ const joy={up:false,down:false,left:false,right:false};
 // park the cursor on your own car to stop. Yields to keyboard, thumb
 // buttons and the touch drag-stick whenever those are active.
 let mousePt=null;
+let msParked=false;
+function mouseTarget(){
+  if(!mousePt) return null;
+  const d=Math.hypot(mousePt.x,mousePt.y);
+  if(d<=380) return mousePt;
+  const s=380/d; return { x:mousePt.x*s, y:mousePt.y*s }; // canvas corners sit outside the ring: clamp the target inside it
+}
 function mouseSteer(){
   const none={up:false,down:false,left:false,right:false};
-  if(!mousePt) return none;
+  const tp=mouseTarget();
+  if(!tp){ msParked=false; return none; }
   if(kb.up||kb.down||kb.left||kb.right||btn.up||btn.down||btn.left||btn.right) return none;
   if(typeof joyPointer!=='undefined' && joyPointer!==null) return none;
   if(!state||!state.cars) return none;
   const me=state.cars.find(c=>c.id===myId);
   if(!me||me.eliminated) return none;
-  const dx=mousePt.x-me.x, dy=mousePt.y-me.y, dist=Math.hypot(dx,dy);
-  if(dist<26) return none;
+  const dx=tp.x-me.x, dy=tp.y-me.y, dist=Math.hypot(dx,dy);
+  // Arrive, don't orbit: at full speed the car's turning circle is ~112
+  // units wide — far wider than any park zone — so a naive chase circles
+  // the cursor forever (mouse4 test). Brake and coast on approach, and
+  // latch "parked" until the cursor moves a real distance away.
+  if(msParked){ if(dist>60) msParked=false; else return none; }
+  else if(dist<30){ msParked=true; return none; }
   let diff=Math.atan2(dy,dx)-me.angle;
   while(diff>Math.PI)diff-=2*Math.PI;
   while(diff<-Math.PI)diff+=2*Math.PI;
-  return { up: Math.abs(diff)<2.45, down: Math.abs(diff)>2.75,
-           left: diff<-0.14, right: diff>0.14 };
+  const speed=Math.hypot(me.vx||0,me.vy||0);
+  let up=Math.abs(diff)<2.45, down=Math.abs(diff)>2.75;
+  if(dist<110){
+    if(speed>170){ up=false; down=true; }  // too hot: brake
+    else if(speed>100){ up=false; }         // coast in
+  }
+  return { up, down, left: diff<-0.14, right: diff>0.14 };
 }
 function currentKeys(){
   const ms=mouseSteer();
@@ -199,12 +217,13 @@ setInterval(()=>{
   const el=document.getElementById('dbg'); if(!el) return;
   const me=state&&state.cars?state.cars.find(c=>c.id===myId):null;
   const ms=mouseSteer();
+  const mt=mouseTarget();
   let diff='—';
-  if(me&&mousePt){ let d=Math.atan2(mousePt.y-me.y,mousePt.x-me.x)-me.angle; while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI; diff=Math.round(d*57.3)+'deg'; }
+  if(me&&mt){ let d=Math.atan2(mt.y-me.y,mt.x-me.x)-me.angle; while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI; diff=Math.round(d*57.3)+'deg'; }
   const msk=(ms.up?'U':'')+(ms.down?'D':'')+(ms.left?'L':'')+(ms.right?'R':'');
   el.textContent='build '+BUILD
-    +' | mp='+(mousePt?Math.round(mousePt.x)+','+Math.round(mousePt.y):'—')
-    +' | me='+(me?Math.round(me.x)+','+Math.round(me.y)+' a='+me.angle+' elim='+me.eliminated:'—')
+    +' | mp='+(mt?Math.round(mt.x)+','+Math.round(mt.y):'—')
+    +' | me='+(me?Math.round(me.x)+','+Math.round(me.y)+' a='+me.angle+' elim='+me.eliminated+' sp='+Math.round(Math.hypot(me.vx||0,me.vy||0)):'—')
     +' | diff='+diff+' | ms='+(msk||'—')
     +' | away='+(me?me.away:'—')+' foc='+(document.hasFocus?document.hasFocus():false)+' hid='+document.hidden
     +' | jp='+(typeof joyPointer!=='undefined'?String(joyPointer):'?');
