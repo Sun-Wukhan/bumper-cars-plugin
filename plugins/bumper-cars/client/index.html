@@ -85,7 +85,7 @@
  <div id="focusHint" class="hidden">⌨️ Click the arena, then hold W or ↑ to drive</div>
  <div id="resultsPanel" class="hidden"></div>
  <canvas id="cv" width="800" height="800"></canvas>
- <p class="hint">Arrows / WASD, thumb buttons, or drag on the arena to drive. Bump others fast for points — wreck them or push them out of the circle (+25) to knock them out!</p>
+ <p class="hint">Move your mouse over the arena to steer and drive — or arrows / WASD, thumb buttons, or drag. Bump others fast for points — wreck them or push them out of the circle (+25) to knock them out!</p>
  <div class="touchbar" id="touchbar">
    <div class="tcluster">
      <button class="tbtn" data-k="left" aria-label="Steer left">◀</button>
@@ -132,9 +132,32 @@ let currentRoom=null, joinedName='Player', spectateChosen=false;
 const kb={up:false,down:false,left:false,right:false};
 const btn={up:false,down:false,left:false,right:false};
 const joy={up:false,down:false,left:false,right:false};
+// --- mouse driving: steer toward the cursor over the arena, no keys and
+// no click needed, so anyone can play. The cursor is the target: the car
+// turns toward it and drives while it is more than a car-length away;
+// park the cursor on your own car to stop. Yields to keyboard, thumb
+// buttons and the touch drag-stick whenever those are active.
+let mousePt=null, mouseAt=0;
+function mouseSteer(){
+  const none={up:false,down:false,left:false,right:false};
+  if(!mousePt || performance.now()-mouseAt>3500) return none;
+  if(kb.up||kb.down||kb.left||kb.right||btn.up||btn.down||btn.left||btn.right) return none;
+  if(typeof joyPointer!=='undefined' && joyPointer!==null) return none;
+  if(!state||!state.cars) return none;
+  const me=state.cars.find(c=>c.id===myId);
+  if(!me||me.eliminated) return none;
+  const dx=mousePt.x-me.x, dy=mousePt.y-me.y, dist=Math.hypot(dx,dy);
+  if(dist<26) return none;
+  let diff=Math.atan2(dy,dx)-me.angle;
+  while(diff>Math.PI)diff-=2*Math.PI;
+  while(diff<-Math.PI)diff+=2*Math.PI;
+  return { up: Math.abs(diff)<2.45, down: Math.abs(diff)>2.75,
+           left: diff<-0.14, right: diff>0.14 };
+}
 function currentKeys(){
-  return { up: kb.up||btn.up||joy.up, down: kb.down||btn.down||joy.down,
-           left: kb.left||btn.left||joy.left, right: kb.right||btn.right||joy.right };
+  const ms=mouseSteer();
+  return { up: kb.up||btn.up||joy.up||ms.up, down: kb.down||btn.down||joy.down||ms.down,
+           left: kb.left||btn.left||joy.left||ms.left, right: kb.right||btn.right||joy.right||ms.right };
 }
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
 
@@ -159,6 +182,7 @@ setInterval(()=>{ if(ws&&ws.readyState===1){
   // "away": this page cannot be driven right now (hidden, or another app
   // holds the keyboard) and no key is held — the server lets a bot drive
   // the car until the player comes back, instead of leaving it parked.
+  if(k.up||k.down||k.left||k.right) lastDriveKeyAt=performance.now();
   const awayNow=(document.hidden||(document.hasFocus&&!document.hasFocus()))&&!(k.up||k.down||k.left||k.right);
   ws.send(JSON.stringify({type:'input',keys:k,away:awayNow}));
 } },50);
@@ -174,7 +198,7 @@ setInterval(()=>{
   const el=document.getElementById('focusHint'); if(!el) return;
   const me=state&&state.cars?state.cars.find(c=>c.id===myId):null;
   const inGame=!document.getElementById('game').classList.contains('hidden');
-  const driving=pressedCodes.size>0||btn.up||btn.down||btn.left||btn.right||joy.up||joy.down||joy.left||joy.right;
+  const ck=currentKeys(); const driving=ck.up||ck.down||ck.left||ck.right;
   const quietFor=performance.now()-Math.max(lastDriveKeyAt||0, welcomedAt||0);
   let mode='';
   if(inGame&&!!me&&!me.eliminated&&!resultsShown&&me.away) mode='away';
@@ -182,7 +206,7 @@ setInterval(()=>{
   if(mode!==hintMode){
     hintMode=mode;
     el.textContent = mode==='away' ? '🤖 A bot is driving for you — click back here to take over'
-      : '⌨️ Click the arena, then hold W or ↑ to drive';
+      : '🖱 Move your mouse over the arena to drive — or click it and hold W / ↑';
   }
   el.classList.toggle('hidden', !mode);
 },500);
@@ -337,6 +361,12 @@ document.getElementById('touchbar').addEventListener('contextmenu',e=>e.preventD
 let joyPointer=null, joyOrigin=null, joyNow=null;
 function canvasPoint(e){ const r=cv.getBoundingClientRect();
   return { x:(e.clientX-r.left)/r.width*800, y:(e.clientY-r.top)/r.height*800 }; }
+cv.addEventListener('pointermove',e=>{
+  if(e.pointerType!=='mouse') return;
+  const r=cv.getBoundingClientRect(); if(!r.width) return;
+  mousePt={ x:(e.clientX-r.left)/r.width*800, y:(e.clientY-r.top)/r.height*800 };
+  mouseAt=performance.now();
+});
 cv.addEventListener('pointerdown',e=>{ if(joyPointer!==null)return;
   joyPointer=e.pointerId; try{cv.setPointerCapture(e.pointerId);}catch(err){}
   joyOrigin=canvasPoint(e); joyNow=joyOrigin; e.preventDefault(); });
