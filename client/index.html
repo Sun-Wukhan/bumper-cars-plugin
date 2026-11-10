@@ -85,7 +85,7 @@
  <div id="focusHint" class="hidden">⌨️ Click the arena, then hold W or ↑ to drive</div>
  <div id="resultsPanel" class="hidden"></div>
  <canvas id="cv" width="800" height="800"></canvas>
- <p class="hint">Move your mouse over the arena to steer and drive — or arrows / WASD, thumb buttons, or drag. Bump others fast for points — wreck them or push them out of the circle (+25) to knock them out!</p>
+ <p class="hint">Move your mouse over the arena to steer and drive — or arrows / WASD, thumb buttons, or drag. <span id="buildTag"></span> Bump others fast for points — wreck them or push them out of the circle (+25) to knock them out!</p>
  <div class="touchbar" id="touchbar">
    <div class="tcluster">
      <button class="tbtn" data-k="left" aria-label="Steer left">◀</button>
@@ -97,6 +97,7 @@
    </div>
  </div>
 </div></div>
+<div id="dbg" class="hidden" style="position:fixed;left:8px;bottom:8px;z-index:70;background:rgba(0,0,0,.78);color:#7CFC00;font:11px/1.5 monospace;padding:6px 8px;border-radius:6px;pointer-events:none;white-space:pre"></div>
 <script>
 const params = new URLSearchParams(location.search);
 // Server address resolution, in order:
@@ -123,6 +124,7 @@ const SERVER = defaultServer();
 if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window)) {
   document.body.classList.add('touch');
 }
+const BUILD='2026-11-10-mouse3'; // bump on every client push; shown in the hint line + ?debug=1 readout
 let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
 let lastDriveKeyAt=0, welcomedAt=0; // focus hint: when did a driving key last register?
 let agentStatus='idle'; // Claude status from the local bridge ('idle' when not in bridge mode)
@@ -186,6 +188,27 @@ setInterval(()=>{ if(ws&&ws.readyState===1){
   const awayNow=(document.hidden||((document.hasFocus&&!document.hasFocus())&&!mousePt))&&!(k.up||k.down||k.left||k.right);
   ws.send(JSON.stringify({type:'input',keys:k,away:awayNow}));
 } },50);
+
+document.getElementById('buildTag').textContent='· build '+BUILD;
+// --- debug readout (?debug=1): live input state, so a playtest can say
+// exactly which branch is failing instead of guessing from the car.
+const DBG=new URLSearchParams(location.search).has('debug');
+if(DBG) document.getElementById('dbg').classList.remove('hidden');
+setInterval(()=>{
+  if(!DBG) return;
+  const el=document.getElementById('dbg'); if(!el) return;
+  const me=state&&state.cars?state.cars.find(c=>c.id===myId):null;
+  const ms=mouseSteer();
+  let diff='—';
+  if(me&&mousePt){ let d=Math.atan2(mousePt.y-me.y,mousePt.x-me.x)-me.angle; while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI; diff=Math.round(d*57.3)+'deg'; }
+  const msk=(ms.up?'U':'')+(ms.down?'D':'')+(ms.left?'L':'')+(ms.right?'R':'');
+  el.textContent='build '+BUILD
+    +' | mp='+(mousePt?Math.round(mousePt.x)+','+Math.round(mousePt.y):'—')
+    +' | me='+(me?Math.round(me.x)+','+Math.round(me.y)+' a='+me.angle+' elim='+me.eliminated:'—')
+    +' | diff='+diff+' | ms='+(msk||'—')
+    +' | away='+(me?me.away:'—')+' foc='+(document.hasFocus?document.hasFocus():false)+' hid='+document.hidden
+    +' | jp='+(typeof joyPointer!=='undefined'?String(joyPointer):'?');
+},250);
 
 // --- focus hint: never let "Claude has me" or "the keys went to another
 // window" fail silently. While the player is away (page hidden/unfocused)
@@ -362,7 +385,10 @@ let joyPointer=null, joyOrigin=null, joyNow=null;
 function canvasPoint(e){ const r=cv.getBoundingClientRect();
   return { x:(e.clientX-r.left)/r.width*800, y:(e.clientY-r.top)/r.height*800 }; }
 cv.addEventListener('pointermove',e=>{
-  if(e.pointerType!=='mouse') return;
+  // Track any hover (no buttons down), whatever the pointer type is — the
+  // drag-stick owns button-held pointers, and a touch/pen hover is still
+  // a live cursor. Button-held mouse moves track too (drag yields in mouseSteer).
+  if(e.buttons!==0 && e.pointerType!=='mouse') return;
   const r=cv.getBoundingClientRect(); if(!r.width) return;
   mousePt={ x:(e.clientX-r.left)/r.width*800, y:(e.clientY-r.top)/r.height*800 };
 });
