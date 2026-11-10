@@ -58,6 +58,7 @@
  .tbtn.gas{background:#1e8449;border-color:#2ecc71;height:88px;width:88px}
  .tbtn.brake{background:#7b241c;border-color:#e74c3c}
  .tbtn.active{filter:brightness(1.7);transform:scale(.94)}
+ #focusHint{position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:55;background:#1d6fb8;color:#fff;font-size:16px;font-weight:700;padding:9px 18px;border-radius:999px;box-shadow:0 4px 18px rgba(0,0,0,.45);pointer-events:none;animation:attPulse 1.6s ease-in-out infinite}
 </style></head><body><div id="wrap">
 <h1>🏎️ Bumper Cars</h1>
 <div id="join">
@@ -81,6 +82,7 @@
   </div>
   <div id="outSpectating" class="hidden">👀 Spectating — you're back in next round, or jump out any time from the results panel</div>
  </div>
+ <div id="focusHint" class="hidden">⌨️ Click the arena, then hold W or ↑ to drive</div>
  <div id="resultsPanel" class="hidden"></div>
  <canvas id="cv" width="800" height="800"></canvas>
  <p class="hint">Arrows / WASD, thumb buttons, or drag on the arena to drive. Bump others fast for points — wreck them or push them out of the circle (+25) to knock them out!</p>
@@ -122,6 +124,7 @@ if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchsta
   document.body.classList.add('touch');
 }
 let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
+let lastDriveKeyAt=0, welcomedAt=0; // focus hint: when did a driving key last register?
 let agentStatus='idle'; // Claude status from the local bridge ('idle' when not in bridge mode)
 let currentRoom=null, joinedName='Player', spectateChosen=false;
 // Three independent input sources, OR-ed together every send tick:
@@ -154,6 +157,20 @@ addEventListener('orientationchange',()=>setTimeout(fitCanvas,60));
 setInterval(()=>{ if(ws&&ws.readyState===1){
   ws.send(JSON.stringify({type:'input',keys:currentKeys()}));
 } },50);
+
+// --- focus hint: never let "the keys went to another window" fail silently.
+// If a round is live, the player is alive, and no driving key has registered
+// for a few seconds, the page almost certainly does not have keyboard focus
+// (macOS sends keys to the frontmost app only) — say so, on screen.
+setInterval(()=>{
+  const el=document.getElementById('focusHint'); if(!el) return;
+  const me=state&&state.cars?state.cars.find(c=>c.id===myId):null;
+  const inGame=!document.getElementById('game').classList.contains('hidden');
+  const driving=pressedCodes.size>0||btn.up||btn.down||btn.left||btn.right||joy.up||joy.down||joy.left||joy.right;
+  const quietFor=performance.now()-Math.max(lastDriveKeyAt||0, welcomedAt||0);
+  const show=inGame&&!!me&&!me.eliminated&&!resultsShown&&!driving&&quietFor>4000;
+  el.classList.toggle('hidden', !show);
+},500);
 
 // --- Claude bridge status polling (plugin mode only) ---
 // Active only when this page was served from localhost / 127.0.0.1, i.e.
@@ -200,7 +217,7 @@ function connect(room, opts={}){
   ws.onopen=()=>ws.send(JSON.stringify({type:'join',name:joinedName,room:room||undefined,
     exclude:(!room && opts.exclude) ? opts.exclude : undefined}));
   ws.onmessage=(ev)=>{const m=JSON.parse(ev.data);
-    if(m.type==='welcome'){myId=m.id; currentRoom=m.room; spectateChosen=false;
+    if(m.type==='welcome'){myId=m.id; currentRoom=m.room; spectateChosen=false; welcomedAt=performance.now(); lastDriveKeyAt=0;
       document.getElementById('roomCode').textContent=m.room;
       document.getElementById('join').classList.add('hidden');document.getElementById('game').classList.remove('hidden');
       document.body.classList.add('ingame'); fitCanvas();}
@@ -282,7 +299,7 @@ function syncKb(){
 }
 addEventListener('keydown',e=>{ const tag=e.target&&e.target.tagName;
   if(tag==='INPUT')return; // typing a name / room code: leave keys (and space) alone
-  if(keymap[e.code]){ pressedCodes.add(e.code); syncKb(); e.preventDefault(); return; }
+  if(keymap[e.code]){ pressedCodes.add(e.code); lastDriveKeyAt=performance.now(); syncKb(); e.preventDefault(); return; }
   if(e.code==='Space'&&tag!=='BUTTON') e.preventDefault(); // stop page scroll; buttons keep their space-to-click
 });
 addEventListener('keyup',e=>{ if(keymap[e.code]){ pressedCodes.delete(e.code); syncKb(); e.preventDefault(); }});
