@@ -124,7 +124,7 @@ const SERVER = defaultServer();
 if (window.matchMedia && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window)) {
   document.body.classList.add('touch');
 }
-const BUILD='2026-11-10-mouse5'; // bump on every client push; shown in the hint line + ?debug=1 readout
+const BUILD='2026-11-10-mouse6'; // bump on every client push; shown in the hint line + ?debug=1 readout
 let ws, myId=null, state=null, resultsShown=false, resultsShownAt=0;
 let lastDriveKeyAt=0, welcomedAt=0; // focus hint: when did a driving key last register?
 let agentStatus='idle'; // Claude status from the local bridge ('idle' when not in bridge mode)
@@ -143,12 +143,18 @@ let mousePt=null;
 let msParked=false;
 function mouseTarget(){
   if(!mousePt) return null;
-  const d=Math.hypot(mousePt.x,mousePt.y);
-  if(d<=380) return mousePt;
-  const s=380/d; return { x:mousePt.x*s, y:mousePt.y*s }; // canvas corners sit outside the ring: clamp the target inside it
+  const r=cv.getBoundingClientRect(); if(!r.width) return null;
+  // State coords are CENTRE-origin (-400..400); the canvas maps them with
+  // a +400 offset. Converting per tick with the live rect means a layout
+  // shift (banner appearing, resize) can never stale the target.
+  let px=(mousePt.x-r.left)/r.width*800-400, py=(mousePt.y-r.top)/r.height*800-400;
+  const d=Math.hypot(px,py);
+  if(d>380){ const s=380/d; px*=s; py*=s; } // canvas corners sit outside the ring: clamp inside it
+  return { x:px, y:py };
 }
 function mouseSteer(){
   const none={up:false,down:false,left:false,right:false};
+  const brake={up:false,down:true,left:false,right:false};
   const tp=mouseTarget();
   if(!tp){ msParked=false; return none; }
   if(kb.up||kb.down||kb.left||kb.right||btn.up||btn.down||btn.left||btn.right) return none;
@@ -157,21 +163,24 @@ function mouseSteer(){
   const me=state.cars.find(c=>c.id===myId);
   if(!me||me.eliminated) return none;
   const dx=tp.x-me.x, dy=tp.y-me.y, dist=Math.hypot(dx,dy);
-  // Arrive, don't orbit: at full speed the car's turning circle is ~112
-  // units wide — far wider than any park zone — so a naive chase circles
-  // the cursor forever (mouse4 test). Brake and coast on approach, and
-  // latch "parked" until the cursor moves a real distance away.
-  if(msParked){ if(dist>60) msParked=false; else return none; }
-  else if(dist<30){ msParked=true; return none; }
+  const speed=Math.hypot(me.vx||0,me.vy||0);
+  // Arrival, second attempt (mouse5 still orbited): steer FIRST and only
+  // thrust when roughly aligned (the old 140-degree thrust window kept
+  // the car powered through wide arcs); match a proportional desired
+  // speed so it creeps the last stretch; when parked, BRAKE to a stop
+  // instead of coasting through the zone on leftover momentum.
+  if(msParked){
+    if(dist>60) msParked=false;
+    else return speed>40 ? brake : none;
+  }
+  else if(dist<30 && speed<160){ msParked=true; return speed>40 ? brake : none; }
   let diff=Math.atan2(dy,dx)-me.angle;
   while(diff>Math.PI)diff-=2*Math.PI;
   while(diff<-Math.PI)diff+=2*Math.PI;
-  const speed=Math.hypot(me.vx||0,me.vy||0);
-  let up=Math.abs(diff)<2.45, down=Math.abs(diff)>2.75;
-  if(dist<110){
-    if(speed>170){ up=false; down=true; }  // too hot: brake
-    else if(speed>100){ up=false; }         // coast in
-  }
+  const desired=Math.min(330, Math.max(0,(dist-25)*2.6));
+  let up=false, down=false;
+  if(Math.abs(diff)<0.9){ if(speed<desired) up=true; else if(speed>desired+45) down=true; }
+  else if(Math.abs(diff)>2.75 && dist>70){ down=true; } // target dead astern, far out: reverse-turn
   return { up, down, left: diff<-0.14, right: diff>0.14 };
 }
 function currentKeys(){
@@ -408,11 +417,7 @@ cv.addEventListener('pointermove',e=>{
   // drag-stick owns button-held pointers, and a touch/pen hover is still
   // a live cursor. Button-held mouse moves track too (drag yields in mouseSteer).
   if(e.buttons!==0 && e.pointerType!=='mouse') return;
-  const r=cv.getBoundingClientRect(); if(!r.width) return;
-  // State coords are CENTRE-origin (-400..400); the canvas maps them with
-  // a +400 offset. Store the cursor in the same space or the car steers to
-  // a phantom point 400,400 away (mouse3 bug — it drove out of the ring).
-  mousePt={ x:(e.clientX-r.left)/r.width*800-400, y:(e.clientY-r.top)/r.height*800-400 };
+  mousePt={ x:e.clientX, y:e.clientY }; // client coords; mouseTarget() converts with the LIVE rect each tick
 });
 cv.addEventListener('pointerleave',()=>{ mousePt=null; });
 cv.addEventListener('pointerdown',e=>{ if(joyPointer!==null)return;
